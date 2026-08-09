@@ -357,7 +357,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     integrity = commands.add_parser(
-        "integrity",
+        "play-integrity",
         help="launch an app with our code in place of its own and ask it for tokens",
         description="Force-stops the package, seizes the zygote, launches the app, and catches "
         "the forked process at the point it takes the app's UID -- before ActivityThread.main, "
@@ -673,7 +673,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(build_header(args.package, hash_of_signer, key))
             return 0
 
-        if args.command == "integrity":
+        if args.command == "play-integrity":
             with device.connect() as connection:
                 with connection.open_integrity_session(
                     args.package, uid=args.uid, user=args.user, timeout_ms=args.timeout_ms
