@@ -21,7 +21,9 @@ print()
 
 print("token:")
 with device.connect() as connection:
-    with connection.open_integrity_session(package=PACKAGE) as integrity:
+    # sessions are named by UID; the package list is what turns a name into one
+    uid = keystork.resolve_uid(connection, PACKAGE)
+    with connection.open_integrity_session(PACKAGE, uid) as integrity:
         token = integrity.classic(nonce)
         print(token)
 

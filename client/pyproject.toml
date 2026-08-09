@@ -15,11 +15,6 @@ dependencies = [
     "protobuf>=3.19",
 ]
 
-[project.optional-dependencies]
-# Not needed by `list`. Pulled in by the attestation and certificate handling
-# that lands with get_key_entry.
-crypto = ["cryptography>=41"]
-
 [project.scripts]
 keystork = "keystork.cli:main"
 

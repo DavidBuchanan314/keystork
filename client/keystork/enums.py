@@ -3,11 +3,11 @@
 The wire speaks KeyMint's raw integers and the server never names anything, so
 these tables are the single place a value becomes a word. They are transcribed
 from the vendored AIDL stubs (keystore2 V6 / KeyMint V5) and from the NDK's
-``binder_status.h``.
+`binder_status.h`.
 
-Every lookup goes through :func:`name_of`, which never raises: a device running
+Every lookup goes through `name_of`, which never raises: a device running
 a newer KeyMint than these tables know about must produce a readable
-``UNKNOWN(-1234)`` rather than an exception.
+`UNKNOWN(-1234)` rather than an exception.
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ def name_of(table: Type[IntEnum], value: int) -> str:
 
 
 class Domain(IntEnum):
-    """``android.system.keystore2.Domain``.
+    """`android.system.keystore2.Domain`.
 
-    ``APP`` scopes to the calling UID and ignores ``nspace``; ``SELINUX`` uses
-    ``nspace`` as the SELinux namespace; ``GRANT`` and ``KEY_ID`` address a key
-    by number; ``BLOB`` carries the key material inline.
+    `APP` scopes to the calling UID and ignores `nspace`; `SELINUX` uses
+    `nspace` as the SELinux namespace; `GRANT` and `KEY_ID` address a key
+    by number; `BLOB` carries the key material inline.
     """
 
     APP = 0
@@ -40,7 +40,7 @@ class Domain(IntEnum):
 
 
 class ResponseCode(IntEnum):
-    """``android.system.keystore2.ResponseCode``, as of interface V6.
+    """`android.system.keystore2.ResponseCode`, as of interface V6.
 
     These arrive as *positive* service-specific error codes.
     """
@@ -68,7 +68,7 @@ class ResponseCode(IntEnum):
 
 
 class ErrorCode(IntEnum):
-    """``android.hardware.security.keymint.ErrorCode``, as of KeyMint V5.
+    """`android.hardware.security.keymint.ErrorCode`, as of KeyMint V5.
 
     These arrive as *negative* service-specific error codes: keystore2 embeds a
     KeyMint failure by passing its code through unchanged, and the sign is what
@@ -167,7 +167,7 @@ class ErrorCode(IntEnum):
 
 
 class BinderStatus(IntEnum):
-    """``binder_status_t`` from the NDK's ``android/binder_status.h``.
+    """`binder_status_t` from the NDK's `android/binder_status.h`.
 
     Mostly negative errnos, so the values are Linux's.
     """
@@ -194,7 +194,7 @@ class BinderStatus(IntEnum):
 
 
 class BinderException(IntEnum):
-    """``binder_exception_t`` from the NDK's ``android/binder_status.h``."""
+    """`binder_exception_t` from the NDK's `android/binder_status.h`."""
 
     EX_NONE = 0
     EX_SECURITY = -1
@@ -209,8 +209,40 @@ class BinderException(IntEnum):
     EX_TRANSACTION_FAILED = -129
 
 
+class IntegrityErrorCode(IntEnum):
+    """The Play Integrity SDK's own IntegrityErrorCode.
+
+    Not a keystore2 or KeyMint enum at all -- it is raised inside the app and
+    passed through the daemon untouched -- but it is a wire integer that wants
+    a name, which is what this module is for. Documented at
+    developer.android.com/google/play/integrity/reference, under
+    IntegrityErrorCode.
+    """
+
+    API_NOT_AVAILABLE = -1
+    PLAY_STORE_NOT_FOUND = -2
+    NETWORK_ERROR = -3
+    PLAY_STORE_ACCOUNT_NOT_FOUND = -4
+    APP_NOT_INSTALLED = -5
+    PLAY_SERVICES_NOT_FOUND = -6
+    APP_UID_MISMATCH = -7
+    TOO_MANY_REQUESTS = -8
+    CANNOT_BIND_TO_SERVICE = -9
+    NONCE_TOO_SHORT = -10
+    NONCE_TOO_LONG = -11
+    GOOGLE_SERVER_UNAVAILABLE = -12
+    NONCE_IS_NOT_BASE64 = -13
+    PLAY_STORE_VERSION_OUTDATED = -14
+    PLAY_SERVICES_VERSION_OUTDATED = -15
+    CLOUD_PROJECT_NUMBER_IS_INVALID = -16
+    REQUEST_HASH_TOO_LONG = -17
+    CLIENT_TRANSIENT_ERROR = -18
+    INTEGRITY_TOKEN_PROVIDER_INVALID = -19
+    INTERNAL_ERROR = -100
+
+
 class Algorithm(IntEnum):
-    """``android.hardware.security.keymint.Algorithm``."""
+    """`android.hardware.security.keymint.Algorithm`."""
 
     RSA = 1
     EC = 3
@@ -221,7 +253,7 @@ class Algorithm(IntEnum):
 
 
 class BlockMode(IntEnum):
-    """``android.hardware.security.keymint.BlockMode``."""
+    """`android.hardware.security.keymint.BlockMode`."""
 
     ECB = 1
     CBC = 2
@@ -230,7 +262,7 @@ class BlockMode(IntEnum):
 
 
 class PaddingMode(IntEnum):
-    """``android.hardware.security.keymint.PaddingMode``."""
+    """`android.hardware.security.keymint.PaddingMode`."""
 
     NONE = 1
     RSA_OAEP = 2
@@ -241,7 +273,7 @@ class PaddingMode(IntEnum):
 
 
 class Digest(IntEnum):
-    """``android.hardware.security.keymint.Digest``."""
+    """`android.hardware.security.keymint.Digest`."""
 
     NONE = 0
     MD5 = 1
@@ -253,9 +285,9 @@ class Digest(IntEnum):
 
 
 class KeyPurpose(IntEnum):
-    """``android.hardware.security.keymint.KeyPurpose``.
+    """`android.hardware.security.keymint.KeyPurpose`.
 
-    An operation names exactly one of these in ``Tag.PURPOSE``; the key must
+    An operation names exactly one of these in `Tag.PURPOSE`; the key must
     have been generated allowing it.
     """
 
@@ -269,7 +301,7 @@ class KeyPurpose(IntEnum):
 
 
 class EcCurve(IntEnum):
-    """``android.hardware.security.keymint.EcCurve``."""
+    """`android.hardware.security.keymint.EcCurve`."""
 
     P_224 = 0
     P_256 = 1
@@ -279,7 +311,7 @@ class EcCurve(IntEnum):
 
 
 class KeyOrigin(IntEnum):
-    """``android.hardware.security.keymint.KeyOrigin``."""
+    """`android.hardware.security.keymint.KeyOrigin`."""
 
     GENERATED = 0
     DERIVED = 1
@@ -289,7 +321,7 @@ class KeyOrigin(IntEnum):
 
 
 class HardwareAuthenticatorType(IntEnum):
-    """``android.hardware.security.keymint.HardwareAuthenticatorType``."""
+    """`android.hardware.security.keymint.HardwareAuthenticatorType`."""
 
     NONE = 0
     PASSWORD = 1
@@ -298,17 +330,17 @@ class HardwareAuthenticatorType(IntEnum):
 
 
 class MlDsaVariant(IntEnum):
-    """``android.hardware.security.keymint.MlDsaVariant``."""
+    """`android.hardware.security.keymint.MlDsaVariant`."""
 
     ML_DSA_65 = 1
     ML_DSA_87 = 2
 
 
 class SecurityLevel(IntEnum):
-    """``android.hardware.security.keymint.SecurityLevel``.
+    """`android.hardware.security.keymint.SecurityLevel`.
 
-    Which backend to ask keystore2 for. ``TRUSTED_ENVIRONMENT`` is the ordinary
-    hardware-backed choice; ``STRONGBOX`` needs a device that has one.
+    Which backend to ask keystore2 for. `TRUSTED_ENVIRONMENT` is the ordinary
+    hardware-backed choice; `STRONGBOX` needs a device that has one.
     """
 
     SOFTWARE = 0
@@ -318,10 +350,10 @@ class SecurityLevel(IntEnum):
 
 
 class TagType(IntEnum):
-    """``android.hardware.security.keymint.TagType``.
+    """`android.hardware.security.keymint.TagType`.
 
-    A KeyMint ``Tag`` carries its type in its top four bits, so
-    :func:`type_of_tag` recovers this from any tag -- including one these tables
+    A KeyMint `Tag` carries its type in its top four bits, so
+    `type_of_tag` recovers this from any tag -- including one these tables
     have never seen -- and that is what decides how a parameter is put on the
     wire.
     """
@@ -340,7 +372,7 @@ class TagType(IntEnum):
 
 
 class Tag(IntEnum):
-    """``android.hardware.security.keymint.Tag``, as of KeyMint V5."""
+    """`android.hardware.security.keymint.Tag`, as of KeyMint V5."""
 
     INVALID = 0
     PURPOSE = 536870913
@@ -412,8 +444,8 @@ class Tag(IntEnum):
     MAX_BOOT_LEVEL = 805307378
 
 
-#: The KeyMint enum each ENUM/ENUM_REP tag draws its values from. Only these
-#: tags need it: every other tag's type is recoverable from the tag itself.
+# The KeyMint enum each ENUM/ENUM_REP tag draws its values from. Only these
+# tags need it: every other tag's type is recoverable from the tag itself.
 TAG_ENUMS = {
     Tag.ALGORITHM: Algorithm,
     Tag.BLOCK_MODE: BlockMode,
@@ -430,7 +462,7 @@ TAG_ENUMS = {
 
 
 def type_of_tag(tag: int) -> TagType:
-    """The :class:`TagType` encoded in `tag`'s top four bits.
+    """The `TagType` encoded in `tag`'s top four bits.
 
     Works for tags these tables have never seen, which is the point: a new
     KeyMint tag still round-trips without a client update.

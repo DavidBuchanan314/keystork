@@ -3,19 +3,33 @@
     >>> import keystork
     >>> device = keystork.Device()
     >>> with device.connect() as conn:
-    ...     with conn.open_keystore_session(uid=10123) as ks:
+    ...     with conn.open_keystore_session(10123) as ks:
     ...         for key in ks.list():
     ...             print(key)
 
 A device is an address, a connection is a conversation with the daemon, and a
 session is a connection that has been handed over. Each is reached by a verb on
-the one before it, and :class:`Device` is the only one you construct.
+the one before it, and `Device` is the only one you construct.
+
+Identity is a UID throughout. Nothing here knows what a package is; that lives
+in `keystork.util.packages`, whose `resolve_uid` turns a name into a number
+over a connection that is still at the top level.
 
 The daemon on the device is deliberately dumb: it makes one keystore2 Binder
 call as the session's UID and hands the raw bytes back. Everything that is
 interpretation -- naming enum values, pagination, typed errors -- lives here.
 """
 
+from .connection import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_TIMEOUT,
+    DEVICE_SHELL,
+    PROTOCOL_VERSION,
+    READ_CHUNK_BYTES,
+    Connection,
+    Device,
+)
 from .enums import (
     TAG_ENUMS,
     Algorithm,
@@ -27,6 +41,7 @@ from .enums import (
     EcCurve,
     ErrorCode,
     HardwareAuthenticatorType,
+    IntegrityErrorCode,
     KeyOrigin,
     KeyPurpose,
     MlDsaVariant,
@@ -51,6 +66,22 @@ from .errors import (
     TransactionError,
     UnsupportedByDevice,
 )
+from .integrity import INTEGRITY_TIMEOUT, IntegritySession
+from .keystore import (
+    MIN_INTERFACE_VERSION,
+    NONCE_LENGTHS,
+    Authorization,
+    KeyDescriptor,
+    KeyMetadata,
+    KeyParameter,
+    KeyRef,
+    KeystoreSession,
+    Operation,
+    OperationBegun,
+    OperationResult,
+    nonce_length,
+    operation_parameters,
+)
 from .process import (
     CHUNK_BYTES,
     DEFAULT_WINDOW,
@@ -59,36 +90,21 @@ from .process import (
     STDOUT,
     ExitStatus,
     Process,
-)
-from .session import (
-    DEFAULT_HOST,
-    DEFAULT_PORT,
-    DEFAULT_TIMEOUT,
-    DEVICE_SHELL,
-    MIN_INTERFACE_VERSION,
-    PROTOCOL_VERSION,
-    Authorization,
-    Connection,
-    Device,
-    IntegritySession,
-    KeystoreSession,
-    KeyDescriptor,
-    KeyMetadata,
-    KeyParameter,
-    Operation,
-    OperationBegun,
-    OperationResult,
-    NONCE_LENGTHS,
-    READ_CHUNK_BYTES,
-    nonce_length,
-    operation_parameters,
+    local_window,
+    stdin_is_tty,
 )
 from . import util
 from .util.packages import (
     PACKAGES_LIST,
+    PACKAGES_XML,
     USER_OFFSET,
+    cert_hash,
+    package_cert_hash,
+    package_uids,
     parse_packages_list,
+    parse_signing_certs,
     resolve_uid,
+    signing_cert,
 )
 
 __version__ = "0.1.0"
@@ -116,8 +132,10 @@ __all__ = [
     "ErrorCode",
     "ExitStatus",
     "HardwareAuthenticatorType",
+    "INTEGRITY_TIMEOUT",
     "IdentityError",
     "IntegrityError",
+    "IntegrityErrorCode",
     "IntegritySession",
     "KeyDescriptor",
     "KeyMetadata",
@@ -125,6 +143,7 @@ __all__ = [
     "KeyOrigin",
     "KeyParameter",
     "KeyPurpose",
+    "KeyRef",
     "KeystoreError",
     "KeystoreSession",
     "KeystorkError",
@@ -135,6 +154,7 @@ __all__ = [
     "OperationBegun",
     "OperationResult",
     "PACKAGES_LIST",
+    "PACKAGES_XML",
     "PROTOCOL_VERSION",
     "PaddingMode",
     "Process",
@@ -151,11 +171,18 @@ __all__ = [
     "TransactionError",
     "USER_OFFSET",
     "UnsupportedByDevice",
+    "cert_hash",
+    "local_window",
     "name_of",
     "nonce_length",
     "operation_parameters",
+    "package_cert_hash",
+    "package_uids",
     "parse_packages_list",
+    "parse_signing_certs",
     "resolve_uid",
+    "signing_cert",
+    "stdin_is_tty",
     "type_of_tag",
     "util",
 ]

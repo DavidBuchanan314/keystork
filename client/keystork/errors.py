@@ -1,14 +1,23 @@
 """Typed exceptions.
 
-The server hands back ``{kind, code, message}`` and never interprets it. This
+The server hands back `{kind, code, message}` and never interprets it. This
 module is where a wire error becomes something with a name and a type you can
 catch, per the sign-of-the-code rule: a positive service-specific code is a
-keystore2 ``ResponseCode``, a negative one is an embedded KeyMint ``ErrorCode``.
+keystore2 `ResponseCode`, a negative one is an embedded KeyMint `ErrorCode`.
 """
 
 from __future__ import annotations
 
-from .enums import BinderException, BinderStatus, ErrorCode, ResponseCode, name_of
+from typing import Optional
+
+from .enums import (
+    BinderException,
+    BinderStatus,
+    ErrorCode,
+    IntegrityErrorCode,
+    ResponseCode,
+    name_of,
+)
 from ._proto import keystork_pb2 as pb
 
 
@@ -23,7 +32,7 @@ class ConnectionClosed(KeystorkError):
 class ProtocolError(KeystorkError):
     """The exchange broke down: bad framing, a malformed or unexpected message.
 
-    Also raised for the server's ``PROTOCOL`` errors, which mean the daemon
+    Also raised for the server's `PROTOCOL` errors, which mean the daemon
     could not act on what it was sent.
     """
 
@@ -42,15 +51,15 @@ class IdentityError(KeystorkError):
 
 
 class CommandFailed(KeystorkError):
-    """A program run with ``check_output`` ended badly.
+    """A program run with `check_output` ended badly.
 
-    The remote counterpart of :class:`subprocess.CalledProcessError`: it means
+    The remote counterpart of `subprocess.CalledProcessError`: it means
     the program ran and then failed, which is different from the daemon being
-    unable to run it at all -- that is an :class:`IdentityError`, raised before
+    unable to run it at all -- that is an `IdentityError`, raised before
     anything started.
 
     Carries everything the caller would otherwise have had to ask for: the
-    :class:`~keystork.ExitStatus`, and both streams as bytes.
+    `ExitStatus`, and both streams as bytes.
     """
 
     def __init__(self, path: str, status, stdout: bytes, stderr: bytes) -> None:
@@ -63,57 +72,36 @@ class CommandFailed(KeystorkError):
 
     @property
     def returncode(self) -> int:
-        """As a shell would report it: ``128 + N`` when a signal ended it."""
+        """As a shell would report it: `128 + N` when a signal ended it."""
         return self.status.returncode
 
 
 class IntegrityError(KeystorkError):
     """The Play Integrity API refused, inside the app.
 
-    ``code`` is the SDK's own ``IntegrityErrorCode``, kept as the number it is
-    -- the daemon never sees it, and the app passes it through untouched.
-    :data:`INTEGRITY_ERRORS` names the ones the API documents; an unknown one
-    is still carried, because a new code should not need a client change.
+    `code` is the SDK's own IntegrityErrorCode, kept as the number it is -- the
+    daemon never sees it, and the app passes it through untouched.
+    `IntegrityErrorCode` names the ones the API documents; an unknown one is
+    still carried, because a new code should not need a client change, and
+    `name` is None for it.
     """
 
     def __init__(self, code: int, message: str = "") -> None:
-        named = INTEGRITY_ERRORS.get(code)
+        try:
+            named: Optional[str] = IntegrityErrorCode(code).name
+        except ValueError:
+            named = None
         described = f"{named} ({code})" if named else f"integrity error {code}"
         super().__init__(f"{described}: {message}" if message else described)
         self.code = code
         self.name = named
 
 
-# https://developer.android.com/google/play/integrity/reference/.../IntegrityErrorCode
-INTEGRITY_ERRORS = {
-    -1: "API_NOT_AVAILABLE",
-    -2: "PLAY_STORE_NOT_FOUND",
-    -3: "NETWORK_ERROR",
-    -4: "PLAY_STORE_ACCOUNT_NOT_FOUND",
-    -5: "APP_NOT_INSTALLED",
-    -6: "PLAY_SERVICES_NOT_FOUND",
-    -7: "APP_UID_MISMATCH",
-    -8: "TOO_MANY_REQUESTS",
-    -9: "CANNOT_BIND_TO_SERVICE",
-    -10: "NONCE_TOO_SHORT",
-    -11: "NONCE_TOO_LONG",
-    -12: "GOOGLE_SERVER_UNAVAILABLE",
-    -13: "NONCE_IS_NOT_BASE64",
-    -14: "PLAY_STORE_VERSION_OUTDATED",
-    -15: "PLAY_SERVICES_VERSION_OUTDATED",
-    -16: "CLOUD_PROJECT_NUMBER_IS_INVALID",
-    -17: "REQUEST_HASH_TOO_LONG",
-    -18: "CLIENT_TRANSIENT_ERROR",
-    -19: "INTEGRITY_TOKEN_PROVIDER_INVALID",
-    -100: "INTERNAL_ERROR",
-}
-
-
 class UnsupportedByDevice(KeystorkError):
     """This device's keystore2 is too old for the call you asked for.
 
     Raised from the client's capability table, before anything goes on the
-    wire, so you get the version arithmetic instead of ``UNKNOWN_TRANSACTION``.
+    wire, so you get the version arithmetic instead of `UNKNOWN_TRANSACTION`.
     """
 
     def __init__(self, call: str, required: int, actual: int) -> None:
@@ -161,21 +149,21 @@ class ServiceError(KeystorkError):
 
 
 class KeystoreError(ServiceError):
-    """keystore2 rejected the call. ``code`` is a positive ``ResponseCode``."""
+    """keystore2 rejected the call. `code` is a positive `ResponseCode`."""
 
     def __init__(self, code: int, message: str) -> None:
         super().__init__(code, name_of(ResponseCode, code), message)
 
 
 class KeyMintError(ServiceError):
-    """KeyMint rejected the call. ``code`` is a negative ``ErrorCode``."""
+    """KeyMint rejected the call. `code` is a negative `ErrorCode`."""
 
     def __init__(self, code: int, message: str) -> None:
         super().__init__(code, name_of(ErrorCode, code), message)
 
 
 def from_wire(error: pb.Error) -> KeystorkError:
-    """Build the exception a wire ``Error`` describes. Does not raise it."""
+    """Build the exception a wire `Error` describes. Does not raise it."""
     kind = error.kind
     message = error.message
 

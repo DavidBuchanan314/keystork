@@ -1,9 +1,10 @@
 """What the package manager knows about a package: its UID and its signer.
 
-The daemon has no notion of packages: it opens sessions by UID and nothing
-else. Everything here is the client half of that gap -- read the package
-manager's own files at the top level, parse them, and turn a name into the UID
-a session wants or the certificate hash a Google API wants.
+Nothing below the client has a notion of packages. The daemon opens sessions
+and execs processes by UID, and the client's own API takes a UID and nothing
+else, so this module is the whole of the gap: read the package manager's own
+files at the top level, parse them, and turn a name into the UID a session
+wants or the certificate hash a Google API wants.
 
 Both files are root-only, so every function taking a connection is a top-level
 command and none of them work once a session has opened.
@@ -19,25 +20,25 @@ from typing import TYPE_CHECKING, Dict
 from .. import errors
 
 if TYPE_CHECKING:
-    from ..session import Connection
+    from ..connection import Connection
 
-#: Where the package manager records which UID each package runs as. Root-only,
-#: which is why it is read with a top-level command before any session opens.
+# Where the package manager records which UID each package runs as. Root-only,
+# which is why it is read with a top-level command before any session opens.
 PACKAGES_LIST = "/data/system/packages.list"
 
-#: The package manager's full record, signing certificates included. Stored as
-#: Android Binary XML since Android 12; see :func:`packages_xml`.
+# The package manager's full record, signing certificates included. Stored as
+# Android Binary XML since Android 12; see `packages_xml`.
 PACKAGES_XML = "/data/system/packages.xml"
 
-#: What an Android Binary XML file starts with ("ABX" and a version byte).
+# What an Android Binary XML file starts with ("ABX" and a version byte).
 ABX_MAGIC = b"ABX\x00"
 
-#: The device's own converter, which is the only thing that needs to know the
-#: binary format. It is a shell script around ``app_process``, and it insists on
-#: being called by a name ending in ``abx2xml`` -- so argv[0] has to be the path.
+# The device's own converter, which is the only thing that needs to know the
+# binary format. It is a shell script around `app_process`, and it insists on
+# being called by a name ending in `abx2xml` -- so argv[0] has to be the path.
 ABX2XML = "/system/bin/abx2xml"
 
-#: Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
+# Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
 USER_OFFSET = 100000
 
 
@@ -46,7 +47,7 @@ def parse_packages_list(data: bytes) -> Dict[str, int]:
 
     Each line is space-separated with the name first and its UID second;
     everything after that is ignored. The mapping is many-to-one -- packages
-    sharing a ``sharedUserId`` share a UID -- so only this direction is
+    sharing a `sharedUserId` share a UID -- so only this direction is
     well-defined.
     """
     packages: Dict[str, int] = {}
@@ -61,26 +62,40 @@ def parse_packages_list(data: bytes) -> Dict[str, int]:
     return packages
 
 
+def package_uids(conn: "Connection") -> Dict[str, int]:
+    """Every package on `conn`'s device, mapped to its user-0 UID.
+
+    Reads `PACKAGES_LIST` over the connection, so it is a root-only top-level
+    command and only valid before a session opens.
+    """
+    return parse_packages_list(conn.read_file(PACKAGES_LIST))
+
+
 def resolve_uid(conn: "Connection", package: str, user: int = 0) -> int:
     """The UID `package` runs as on `conn`'s device, for Android user `user`.
 
-    Reads `PACKAGES_LIST` over the connection, so it is a root-only top-level
-    command and only valid before a session opens. The list holds user-0 UIDs,
-    so the app id is taken modulo the offset before `user`'s is added back --
-    an entry that already names a secondary user resolves the same as one that
-    does not.
+    This is how a package name becomes something the client can act on: every
+    call that takes an identity takes a UID, and this is the only thing that
+    turns a name into one. Do it while the connection is still at the top
+    level -- it reads a root-only file, and a session has no way back.
+
+    The list holds user-0 UIDs, so the app id is taken modulo the offset before
+    `user`'s is added back -- an entry that already names a secondary user
+    resolves the same as one that does not.
     """
-    packages = conn.packages()
-    if package not in packages:
-        raise errors.IdentityError(f"no package named {package!r} in {PACKAGES_LIST}", 0)
-    return packages[package] % USER_OFFSET + user * USER_OFFSET
+    if user < 0:
+        raise ValueError(f"user must be non-negative, got {user}")
+    installed = package_uids(conn)
+    if package not in installed:
+        raise errors.IdentityError(f"no package named {package!r} in {PACKAGES_LIST}")
+    return installed[package] % USER_OFFSET + user * USER_OFFSET
 
 
 def packages_xml(conn: "Connection") -> bytes:
     """`PACKAGES_XML` as text XML, whatever the device happens to store.
 
     Android 12 and up write it as Android Binary XML, which nothing off-device
-    reads. Rather than decode that here, the device's own ``abx2xml`` converts
+    reads. Rather than decode that here, the device's own `abx2xml` converts
     it -- one exec, on this same connection, which `run` hands back at the top
     level when the child exits. Older devices store text and are read directly.
     """
@@ -92,11 +107,11 @@ def packages_xml(conn: "Connection") -> bytes:
 def parse_signing_certs(data: bytes) -> Dict[str, bytes]:
     """Package name to signing certificate DER, from the text of `PACKAGES_XML`.
 
-    A certificate is written out once, as hex in a ``key`` attribute under an
-    ``index``, and every later package signed by it carries the bare index --
+    A certificate is written out once, as hex in a `key` attribute under an
+    `index`, and every later package signed by it carries the bare index --
     so resolving one means having read the whole file. Only the first
     certificate of a multiply-signed package is taken, which is the one
-    ``PackageInfo`` reports.
+    `PackageInfo` reports.
     """
     root = ET.fromstring(data)
     by_index = {
@@ -123,12 +138,12 @@ def signing_cert(conn: "Connection", package: str) -> bytes:
     """The DER of the certificate `package` is signed with, read from the device."""
     certs = parse_signing_certs(packages_xml(conn))
     if package not in certs:
-        raise errors.IdentityError(f"no signing certificate for {package!r} in {PACKAGES_XML}", 0)
+        raise errors.IdentityError(f"no signing certificate for {package!r} in {PACKAGES_XML}")
     return certs[package]
 
 
 def cert_hash(der: bytes) -> str:
-    """``base64(SHA1(der))`` -- how Google's APIs name a signing certificate.
+    """`base64(SHA1(der))` -- how Google's APIs name a signing certificate.
 
     SHA-1 is not doing anything security-critical here: it is an identifier
     Google's servers already hold, and the value has to match theirs.

@@ -1,4 +1,4 @@
-"""Mint an ``X-Goog-Spatula`` header offline, as GMS would for an app.
+"""Mint an `X-Goog-Spatula` header offline, as GMS would for an app.
 
 The header is how a Google API is told which app on which device is calling.
 GMS computes it in-process, from a per-device secret it was provisioned with
@@ -19,7 +19,7 @@ injection, no GMS code, one connection.
 
 The secret and the device's identifiers come from GMS's own `DeviceKey` blob;
 the certificate hash comes from the package manager. See
-:mod:`keystork.util.packages`.
+`keystork.util.packages`.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ from .._proto import spatula_pb2 as pb
 from .packages import package_cert_hash
 
 if TYPE_CHECKING:
-    from ..session import Connection
+    from ..connection import Connection
 
-#: The app GMS is, and whose data directory the device key lives in.
+# The app GMS is, and whose data directory the device key lives in.
 GMS_PACKAGE = "com.google.android.gms"
 
 
@@ -52,19 +52,19 @@ def device_key_path(user: int = 0) -> str:
 def device_key(conn: "Connection", user: int = 0) -> pb.DeviceKey:
     """GMS's provisioned `DeviceKey`, read from the device as root.
 
-    Raises :class:`~keystork.errors.IdentityError` when the blob is missing or
-    carries no ``macSecret``: an unrooted read, or a device GMS has never
-    checked in on, and neither can produce a header.
+    Raises `IdentityError` when the blob is missing or carries no `macSecret`:
+    an unrooted read, or a device GMS has never checked in on, and neither can
+    produce a header.
     """
     path = device_key_path(user)
     raw = conn.read_file(path)
     if not raw:
-        raise errors.IdentityError(f"{path} is empty; is GMS provisioned for user {user}?", 0)
+        raise errors.IdentityError(f"{path} is empty; is GMS provisioned for user {user}?")
 
     key = pb.DeviceKey()
     key.ParseFromString(raw)
     if not key.macSecret:
-        raise errors.IdentityError(f"{path} carries no macSecret; cannot mint a spatula", 0)
+        raise errors.IdentityError(f"{path} carries no macSecret; cannot mint a spatula")
     return key
 
 
@@ -89,7 +89,7 @@ def build_header(package: str, cert_hash: str, key: pb.DeviceKey) -> str:
 
 
 def header(conn: "Connection", package: str, user: int = 0) -> str:
-    """An ``X-Goog-Spatula`` value for `package`, minted over `conn`.
+    """An `X-Goog-Spatula` value for `package`, minted over `conn`.
 
     Reads the device key and the package's signing certificate, so it is a
     top-level command twice over and only valid before a session opens.

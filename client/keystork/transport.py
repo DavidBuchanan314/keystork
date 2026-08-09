@@ -2,13 +2,12 @@
 
 Frames are a 4-byte big-endian length followed by that many bytes of serialized
 protobuf. Commands and keystore requests are strictly synchronous -- one
-request, one response -- so :class:`Transport` is deliberately blocking and
+request, one response -- so `Transport` is deliberately blocking and
 unmultiplexed.
 
 The exec subprotocol is the exception: both sides send unprompted, so it cannot
-block on either. :class:`FrameReader` and :func:`encode_frame` are the same
-framing with the socket left to the caller, which is what
-:mod:`keystork.process` selects on.
+block on either. `FrameReader` and `encode_frame` are the same framing with the
+socket left to the caller, which is what `keystork.process` selects on.
 """
 
 from __future__ import annotations
@@ -66,11 +65,6 @@ class FrameReader:
             frame = bytes(self._buffer[_HEADER.size : end])
             del self._buffer[:end]
             yield frame
-
-    @property
-    def partial(self) -> bool:
-        """Whether bytes are buffered that do not yet make up a frame."""
-        return bool(self._buffer)
 
 
 class Transport:

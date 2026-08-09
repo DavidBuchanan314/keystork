@@ -10,8 +10,8 @@ the wire is the exit status.
     ...     status, out, err = proc.communicate()
 
 Nothing here is a shell. `path` goes to execve unchanged -- no PATH search, no
-word splitting, no globbing -- so anything wanting those runs ``sh -c``
-explicitly, which is what the CLI's ``shell`` command does.
+word splitting, no globbing -- so anything wanting those runs `sh -c`
+explicitly, which is what the CLI's `shell` command does.
 """
 
 from __future__ import annotations
@@ -29,29 +29,29 @@ from . import errors
 from ._proto import keystork_pb2 as pb
 from .transport import FrameReader, encode_frame
 
-#: Which stream a chunk of output came from. A pty has only one, and it arrives
-#: as :data:`STDOUT`.
+# Which stream a chunk of output came from. A pty has only one, and it arrives
+# as `STDOUT`.
 STDOUT = pb.ExecOutput.STREAM_STDOUT
 STDERR = pb.ExecOutput.STREAM_STDERR
 
-#: How much to read from the socket, or from local stdin, in one go.
+# How much to read from the socket, or from local stdin, in one go.
 CHUNK_BYTES = 65536
 
-#: How much queued stdin stops :meth:`Process.interact` reading more of the
-#: local one. Matches the daemon's own mark. Without it, redirecting a file
-#: into a child that is not reading would pull the whole file into memory here:
-#: poll reports a regular file ready every single time it is asked.
+# How much queued stdin stops `Process.interact` reading more of the
+# local one. Matches the daemon's own mark. Without it, redirecting a file
+# into a child that is not reading would pull the whole file into memory here:
+# poll reports a regular file ready every single time it is asked.
 OUTBOUND_HIGH_WATER = 1024 * 1024
 
-#: What a pty gets when nobody says otherwise, and what a terminal of unknown
-#: size is assumed to be.
+# What a pty gets when nobody says otherwise, and what a terminal of unknown
+# size is assumed to be.
 DEFAULT_WINDOW = (24, 80)
 
-#: ``^]``, telnet's, and the way out of a raw-mode session. Raw mode is exactly
-#: the situation that needs one: every key -- ``^C`` and ``^Z`` included -- is a
-#: byte for the remote line discipline, so nothing typed can reach this end.
-#: Honoured only while the local terminal *is* raw, because that is the only
-#: time stdin is keystrokes rather than data that must survive untouched.
+# `^]`, telnet's, and the way out of a raw-mode session. Raw mode is exactly
+# the situation that needs one: every key -- `^C` and `^Z` included -- is a
+# byte for the remote line discipline, so nothing typed can reach this end.
+# Honoured only while the local terminal *is* raw, because that is the only
+# time stdin is keystrokes rather than data that must survive untouched.
 ESCAPE = 0x1D
 
 # Not DefaultSelector: on Linux that is epoll, which refuses a regular file
@@ -95,15 +95,15 @@ def _has_signal(number: int) -> bool:
 
 
 class Process:
-    """A live remote process. Built by :meth:`keystork.Connection.exec`.
+    """A live remote process. Built by `keystork.Connection.exec`.
 
     The socket is non-blocking for the whole of the process's life, and every
-    method here is a step in a pump rather than a round-trip: :meth:`send`
-    queues, :meth:`stream` and :meth:`interact` do the actual work of moving
+    method here is a step in a pump rather than a round-trip: `send`
+    queues, `stream` and `interact` do the actual work of moving
     bytes in both directions.
     """
 
-    def __init__(self, sock: socket.socket, started: pb.ExecStarted, connection=None) -> None:
+    def __init__(self, sock: socket.socket, started: pb.ExecStarted, connection) -> None:
         self._sock = sock
         self._sock.setblocking(False)
         self._reader = FrameReader()
@@ -113,8 +113,7 @@ class Process:
         self._status: Optional[ExitStatus] = None
         self._hung_up = False
         # Borrowed, not taken: on a clean exit the socket goes back and the
-        # connection carries on at the top level. `None` for a process that
-        # owns its connection outright, which is what run() and system() make.
+        # connection carries on at the top level.
         self._connection = connection
 
     @property
@@ -129,7 +128,7 @@ class Process:
 
     @property
     def status(self) -> Optional[ExitStatus]:
-        """How it ended, or ``None`` while it is still running."""
+        """How it ended, or `None` while it is still running."""
         return self._status
 
     @property
@@ -143,7 +142,7 @@ class Process:
 
         Queued, not written: a child that is not reading would otherwise block
         this end, and this end has output to collect. The bytes go out as the
-        socket accepts them, during :meth:`stream` or :meth:`interact`.
+        socket accepts them, during `stream` or `interact`.
         """
         if data:
             self._queue(pb.ExecInput(stdin_data=bytes(data)))
@@ -152,9 +151,9 @@ class Process:
         """Say that no more stdin will follow.
 
         Without a pty this closes the child's stdin, which is what lets a
-        ``cat`` finish. With one there is nothing to close, so the daemon
+        `cat` finish. With one there is nothing to close, so the daemon
         writes EOT instead -- an end-of-file to a terminal in canonical mode,
-        and an ordinary ``^D`` byte to one in raw mode.
+        and an ordinary `^D` byte to one in raw mode.
         """
         self._queue(pb.ExecInput(stdin_eof=pb.ExecStdinEof()))
 
@@ -165,7 +164,7 @@ class Process:
     def signal(self, number: int) -> None:
         """Signal the child's whole process group.
 
-        A pty client rarely needs this: ``^C`` is a byte like any other and the
+        A pty client rarely needs this: `^C` is a byte like any other and the
         remote line discipline raises the signal itself.
         """
         self._queue(pb.ExecInput(signal=number))
@@ -173,10 +172,10 @@ class Process:
     # -- receiving ------------------------------------------------------
 
     def stream(self) -> Iterator[Tuple[int, bytes]]:
-        """Yield ``(stream, data)`` until the process exits.
+        """Yield `(stream, data)` until the process exits.
 
-        Also drives the outbound queue, so anything :meth:`send` accepted is on
-        its way while this runs. Raises :class:`~keystork.ConnectionClosed` if
+        Also drives the outbound queue, so anything `send` accepted is on
+        its way while this runs. Raises `ConnectionClosed` if
         the daemon hangs up before reporting an exit.
         """
         while not self.finished:
@@ -214,19 +213,19 @@ class Process:
         local ones. When both ends are terminals -- a pty on the device, a tty
         here -- the local one is put in raw mode for the duration and its size
         is tracked, so the remote program sees every keystroke as it is typed
-        and ``^C`` reaches it as a byte rather than killing this client.
+        and `^C` reaches it as a byte rather than killing this client.
 
         That last part is also why `escape` exists. In raw mode nothing typed
         can reach *this* process, so a remote that stops responding would
         otherwise have to be escaped from another terminal. Typing `escape`
-        (:data:`ESCAPE`, ``^]``, by default) returns immediately; ``None``
+        (`ESCAPE`, `^]`, by default) returns immediately; `None`
         disables it.
 
         The escape byte is watched for **only while the local terminal is
         raw**. Anywhere else stdin is data rather than keystrokes, and quietly
         treating a byte of it as a command would corrupt it.
 
-        Returns the exit status, or ``None`` if `escape` was what ended it.
+        Returns the exit status, or `None` if `escape` was what ended it.
         There is no third answer and no detaching: the connection *is* the
         child's stdio, so leaving kills it.
         """
@@ -250,10 +249,9 @@ class Process:
         no longer talk to. So that is what this does, and the connection goes
         with it.
         """
-        if self.finished and self._connection is not None:
+        if self.finished:
             return
-        if self._connection is not None:
-            self._connection._closed_by_process()
+        self._connection._closed_by_process()
         try:
             self._sock.close()
         except OSError:
@@ -331,9 +329,8 @@ class Process:
                 # draining its output, so the connection can be a connection
                 # again. Anything we sent that is still in flight is a Command
                 # like any other and the daemon recognizes it for what it is.
-                if self._connection is not None:
-                    self._sock.setblocking(True)
-                    self._connection._process_ended()
+                self._sock.setblocking(True)
+                self._connection._handed_back()
             elif body == "error":
                 raise errors.from_wire(event.error)
             else:
@@ -497,7 +494,7 @@ def stdin_is_tty() -> bool:
 
 
 def local_window() -> Tuple[int, int]:
-    """This process's own terminal size, or :data:`DEFAULT_WINDOW` if it has none.
+    """This process's own terminal size, or `DEFAULT_WINDOW` if it has none.
 
     stdout is tried after stdin, so a piped-in command run from a terminal
     still gets that terminal's width.
@@ -512,11 +509,11 @@ def local_window() -> Tuple[int, int]:
 class _RawTerminal:
     """Raw mode on a local tty, plus a descriptor that becomes readable on SIGWINCH.
 
-    The pipe is how a resize reaches a ``select``: Python retries an interrupted
+    The pipe is how a resize reaches a `select`: Python retries an interrupted
     syscall rather than surfacing the interruption (PEP 475), so a plain signal
     handler would not be noticed until the next keystroke.
 
-    Passing ``None`` makes the whole thing inert, which is the non-tty case.
+    Passing `None` makes the whole thing inert, which is the non-tty case.
     """
 
     def __init__(self, fd: Optional[int]) -> None:

@@ -6,7 +6,7 @@
     keystork shell
     keystork kill-server
 
-Crypto output is raw bytes on stdout so it pipes; pass ``--hex`` for a
+Crypto output is raw bytes on stdout so it pipes; pass `--hex` for a
 hex string instead. Parameters left unset are read from the key itself.
 """
 
@@ -20,23 +20,32 @@ import sys
 from typing import List, Optional, Sequence
 
 from . import errors
-from .enums import BlockMode, Digest, Domain, KeyPurpose, PaddingMode, Tag, name_of
-from .process import ESCAPE, local_window, stdin_is_tty
-from .session import (
+from .connection import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
     DEVICE_SHELL,
+    Connection,
     Device,
-    KeyDescriptor,
-    KeyMetadata,
-    KeystoreSession,
-    nonce_length,
 )
+from .enums import (
+    Algorithm,
+    BlockMode,
+    Digest,
+    Domain,
+    KeyPurpose,
+    PaddingMode,
+    SecurityLevel,
+    Tag,
+    name_of,
+)
+from .keystore import KeyDescriptor, KeyMetadata, KeystoreSession, nonce_length
+from .process import ESCAPE, local_window, stdin_is_tty
 from .util.packages import (
     PACKAGES_XML,
     cert_hash,
     package_cert_hash,
+    package_uids,
     resolve_uid,
     signing_cert,
 )
@@ -102,7 +111,7 @@ def _add_parameter_args(parser: argparse.ArgumentParser, *, symmetric: bool) -> 
 
 
 def _parse_escape(text: str) -> Optional[int]:
-    """``^]`` caret notation, a bare character, or ``none``."""
+    """`^]` caret notation, a bare character, or `none`."""
     if text.lower() in ("none", "off"):
         return None
     if len(text) == 2 and text[0] == "^":
@@ -124,12 +133,10 @@ def _describe_escape(byte: int) -> str:
 
 
 def _add_process_args(parser: argparse.ArgumentParser) -> None:
-    """How a process is run. Shared by ``shell`` and ``exec``."""
+    """How a process is run. Shared by `shell` and `exec`."""
     identity = parser.add_mutually_exclusive_group()
     identity.add_argument("--uid", type=int, help="run as this UID (default: root)")
-    identity.add_argument(
-        "--package", help="run as this package's UID, resolved over the same connection"
-    )
+    identity.add_argument("--package", help="run as this package's UID")
     parser.add_argument(
         "--user", type=int, default=0, help="Android user id for --package (default: 0)"
     )
@@ -194,10 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
     keystore = commands.add_parser("keystore", help="open a UID-scoped keystore2 session")
     identity = keystore.add_mutually_exclusive_group(required=True)
     identity.add_argument("--uid", type=int, help="the UID this session acts as")
-    identity.add_argument(
-        "--package",
-        help="package name to act as; the device resolves it to a UID",
-    )
+    identity.add_argument("--package", help="package name to act as, instead of a UID")
     keystore.add_argument(
         "--user",
         type=int,
@@ -457,7 +461,6 @@ def _print_info(metadata: KeyMetadata, args: argparse.Namespace) -> None:
         for authorization in metadata.authorizations:
             print(authorization)
     else:
-        from .enums import Algorithm, KeyPurpose, SecurityLevel
 
         def names(table, values):
             return ", ".join(name_of(table, v) for v in values) or "-"
@@ -492,7 +495,7 @@ def _nonce_length_for(session: KeystoreSession, args: argparse.Namespace) -> int
     """How many leading bytes of the input are the nonce.
 
     Asks for the same parameters the decrypt itself will use, so an inferred
-    block mode and an explicit ``--block-mode`` agree by construction.
+    block mode and an explicit `--block-mode` agree by construction.
     """
     parameters = session.crypto_parameters(
         args.alias,
@@ -566,6 +569,18 @@ def _run(session: KeystoreSession, args: argparse.Namespace) -> int:
     raise errors.KeystorkError(f"unimplemented operation {args.operation!r}")
 
 
+def _resolve_identity(connection: Connection, args: argparse.Namespace) -> Optional[int]:
+    """The UID `args` names, whether it named one or named a package.
+
+    The library takes UIDs and nothing else, so turning `--package` into one is
+    the CLI's job. It reads a root-only file, so it has to happen while the
+    connection is still at the top level -- before the exec or the session.
+    """
+    if args.package is None:
+        return args.uid
+    return resolve_uid(connection, args.package, args.user)
+
+
 def _run_process(device: Device, args: argparse.Namespace, path: str, argv: List[str]) -> int:
     """Start a process and join the local stdio to it until it exits."""
     pty = args.tty
@@ -581,9 +596,7 @@ def _run_process(device: Device, args: argparse.Namespace, path: str, argv: List
 
     connection = device.connect()
     try:
-        uid = args.uid
-        if args.package is not None:
-            uid = resolve_uid(connection, args.package, args.user)
+        uid = _resolve_identity(connection, args)
         process = connection.exec(
             path,
             argv,
@@ -648,9 +661,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "packages":
             with device.connect() as connection:
-                packages = connection.packages()
-            for name in sorted(packages):
-                print(f"{packages[name]}\t{name}")
+                uids = package_uids(connection)
+            for name in sorted(uids):
+                print(f"{uids[name]}\t{name}")
             return 0
 
         if args.command == "cert-hash":
@@ -675,8 +688,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "play-integrity":
             with device.connect() as connection:
+                uid = args.uid
+                if uid is None:
+                    uid = resolve_uid(connection, args.package, args.user)
                 with connection.open_integrity_session(
-                    args.package, uid=args.uid, user=args.user, timeout_ms=args.timeout_ms
+                    args.package, uid, timeout_ms=args.timeout_ms
                 ) as integrity:
                     if args.verbose:
                         arm, bind = integrity.steps
@@ -730,13 +746,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _run_process(device, args, args.path, [args.path] + args.args)
 
         with device.connect() as connection:
-            with connection.open_keystore_session(
-                args.uid, package=args.package, user=args.user
-            ) as session:
+            uid = _resolve_identity(connection, args)
+            with connection.open_keystore_session(uid) as session:
                 if args.verbose:
-                    who = f"uid={session.uid}"
-                    if session.package is not None:
-                        who = f"{session.package} {who}"
+                    who = f"{args.package} uid={uid}" if args.package else f"uid={uid}"
                     print(
                         f"session {who}, keystore2 interface V{session.interface_version}",
                         file=sys.stderr,
