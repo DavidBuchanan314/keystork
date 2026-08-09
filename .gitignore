@@ -73,6 +73,7 @@ aosp/
 
 # Slop containment
 AGENTS.md
+design_docs/
 
 # Python stuff
 __pycache__/
