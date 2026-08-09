@@ -79,12 +79,15 @@ from .session import (
     OperationBegun,
     OperationResult,
     NONCE_LENGTHS,
-    PACKAGES_LIST,
     READ_CHUNK_BYTES,
-    USER_OFFSET,
-    parse_packages_list,
     nonce_length,
     operation_parameters,
+)
+from .util.packages import (
+    PACKAGES_LIST,
+    USER_OFFSET,
+    parse_packages_list,
+    resolve_uid,
 )
 
 __version__ = "0.1.0"
@@ -151,5 +154,6 @@ __all__ = [
     "nonce_length",
     "operation_parameters",
     "parse_packages_list",
+    "resolve_uid",
     "type_of_tag",
 ]

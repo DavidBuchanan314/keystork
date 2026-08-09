@@ -43,6 +43,7 @@ from .process import (
     stdin_is_tty,
 )
 from .transport import Transport
+from .util.packages import PACKAGES_LIST, parse_packages_list, resolve_uid
 
 PROTOCOL_VERSION = pb.PROTOCOL_VERSION_1
 
@@ -528,36 +529,9 @@ class Device:
 #: How much of a file to ask for per round-trip. Matches the server's own clamp.
 READ_CHUNK_BYTES = 1024 * 1024
 
-#: Where the package manager records which UID each package runs as. Root-only,
-#: which is why it is read with a top-level command before any session opens.
-PACKAGES_LIST = "/data/system/packages.list"
-
 #: What ``system`` and the CLI's ``shell`` run. An absolute path because the
 #: daemon does no PATH search -- it calls execve and nothing else.
 DEVICE_SHELL = "/system/bin/sh"
-
-#: Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
-USER_OFFSET = 100000
-
-
-def parse_packages_list(data: bytes) -> "Dict[str, int]":
-    """Package name to user-0 UID, from the contents of `PACKAGES_LIST`.
-
-    Each line is space-separated with the name first and its UID second;
-    everything after that is ignored. The mapping is many-to-one -- packages
-    sharing a ``sharedUserId`` share a UID -- so only this direction is
-    well-defined.
-    """
-    packages: Dict[str, int] = {}
-    for line in data.decode(errors="replace").splitlines():
-        fields = line.split(" ", 2)
-        if len(fields) < 2:
-            continue
-        try:
-            packages[fields[0]] = int(fields[1])
-        except ValueError:
-            continue
-    return packages
 
 
 class Connection:
@@ -682,13 +656,6 @@ class Connection:
         """Every package on the device, mapped to its user-0 UID."""
         return parse_packages_list(self.read_file(PACKAGES_LIST))
 
-    def resolve_package(self, name: str, user: int = 0) -> int:
-        """The UID `name` runs as, for Android user `user`."""
-        packages = self.packages()
-        if name not in packages:
-            raise errors.IdentityError(f"no package named {name!r} in {PACKAGES_LIST}", 0)
-        return packages[name] % USER_OFFSET + user * USER_OFFSET
-
     def kill_server(self) -> None:
         """Stop the daemon. Every live session goes with it."""
         self._command(pb.Command(kill_server=pb.KillServerRequest()))
@@ -744,7 +711,7 @@ class Connection:
                 raise ValueError("name a uid or a package, not both")
             # Costs a read_file or two, which is only possible up here at the
             # top level -- so it has to happen before the exec, not after.
-            uid = self.resolve_package(package, user)
+            uid = resolve_uid(self, package, user)
 
         request = pb.ExecRequest(
             path=path,
@@ -920,7 +887,7 @@ class Connection:
         handing the name to ``am``.
         """
         if uid is None:
-            uid = self.resolve_package(package, user)
+            uid = resolve_uid(self, package, user)
         request = pb.OpenIntegritySessionRequest(package=package, uid=uid)
         if timeout_ms is not None:
             request.timeout_ms = timeout_ms
@@ -956,7 +923,7 @@ class Connection:
         if user < 0:
             raise ValueError(f"user must be non-negative, got {user}")
         if package is not None:
-            uid = self.resolve_package(package, user)
+            uid = resolve_uid(self, package, user)
         if uid < 0:
             raise ValueError(f"uid must be non-negative, got {uid}")
 

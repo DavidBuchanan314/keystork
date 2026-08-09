@@ -33,6 +33,7 @@ from .session import (
     KeystoreSession,
     nonce_length,
 )
+from .util.packages import resolve_uid
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -539,7 +540,7 @@ def _run_process(device: Device, args: argparse.Namespace, path: str, argv: List
     try:
         uid = args.uid
         if args.package is not None:
-            uid = connection.resolve_package(args.package, args.user)
+            uid = resolve_uid(connection, args.package, args.user)
         process = connection.exec(
             path,
             argv,
