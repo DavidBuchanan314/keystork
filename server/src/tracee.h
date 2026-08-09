@@ -143,6 +143,22 @@ class Borrow {
   CallResult Call(uint64_t function, uint64_t a0 = 0, uint64_t a1 = 0, uint64_t a2 = 0,
                   uint64_t a3 = 0, uint64_t a4 = 0, uint64_t a5 = 0);
 
+  // Run subsequent calls on the mapping above rather than on the thread's own
+  // stack. Off by default, and that default is load-bearing.
+  //
+  // Before entering managed code ART compares sp against the bounds it
+  // recorded for the thread; a stack it has never heard of reads as an
+  // overflow, so anything that ends up running Java throws StackOverflowError.
+  // Field reads still work, which makes the failure look oddly selective.
+  //
+  // Nothing is lost by using the thread's own: AAPCS64 has no red zone, so
+  // memory below sp is scratch by definition and a call there does exactly
+  // what every ordinary call on that thread does. What the private stack
+  // genuinely buys is *headroom* -- a thread stopped deep in a call chain, or
+  // on a small sigaltstack, can run out while dlopen is running constructors.
+  // Worth turning on for that, and only when nothing managed will run.
+  void UsePrivateStack(bool use) { private_stack_ = use; }
+
  private:
   bool EnsureCallStack();
 
@@ -150,6 +166,7 @@ class Borrow {
   user_regs_struct saved_{};
   bool holding_ = false;
 
+  bool private_stack_ = false;
   uint64_t stack_ = 0;        // base of the whole mapping, guard page included
   size_t stack_bytes_ = 0;
   uint64_t stack_top_ = 0;    // initial sp: full-descending, so the trap page

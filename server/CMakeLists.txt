@@ -214,6 +214,95 @@ target_link_libraries(keystore_aidl PUBLIC binder_ndk_headers)
 target_compile_options(keystore_aidl PRIVATE -w)
 
 # ---------------------------------------------------------------------------
+# The agent's dex
+#
+# The Java half, compiled and dexed at build time and embedded in the agent,
+# which is itself embedded in the daemon. Two levels of .incbin so that what
+# lands on the device is still one file and the dex never touches a filesystem
+# at either end.
+#
+# Needs a JDK and two things from the Android SDK: android.jar to compile
+# against, and d8 to convert class files to dex. Recent cmdline-tools bundle
+# d8, so the separate build-tools package is not required.
+# ---------------------------------------------------------------------------
+
+set(KEYSTORK_ANDROID_SDK "$ENV{ANDROID_HOME}" CACHE PATH
+    "Android SDK root, for android.jar and d8")
+
+if(NOT KEYSTORK_ANDROID_SDK)
+    message(FATAL_ERROR
+        "No Android SDK. Set ANDROID_HOME, or pass -DKEYSTORK_ANDROID_SDK=<path>.\n"
+        "It needs platforms/android-<N>/android.jar and a d8 (in cmdline-tools/latest/bin "
+        "or build-tools/<version>).")
+endif()
+
+# Newest installed platform. NATURAL so android-9 does not sort above
+# android-36.
+file(GLOB KEYSTORK_PLATFORMS "${KEYSTORK_ANDROID_SDK}/platforms/android-*")
+list(SORT KEYSTORK_PLATFORMS COMPARE NATURAL ORDER DESCENDING)
+list(GET KEYSTORK_PLATFORMS 0 KEYSTORK_PLATFORM)
+set(ANDROID_JAR "${KEYSTORK_PLATFORM}/android.jar")
+if(NOT EXISTS "${ANDROID_JAR}")
+    message(FATAL_ERROR
+        "No android.jar under ${KEYSTORK_ANDROID_SDK}/platforms.\n"
+        "  sdkmanager --sdk_root=${KEYSTORK_ANDROID_SDK} \"platforms;android-36\"")
+endif()
+
+file(GLOB KEYSTORK_BUILD_TOOLS "${KEYSTORK_ANDROID_SDK}/build-tools/*")
+find_program(D8_EXECUTABLE NAMES d8
+    PATHS "${KEYSTORK_ANDROID_SDK}/cmdline-tools/latest/bin" ${KEYSTORK_BUILD_TOOLS}
+    NO_DEFAULT_PATH)
+if(NOT D8_EXECUTABLE)
+    message(FATAL_ERROR
+        "No d8 under ${KEYSTORK_ANDROID_SDK}. It ships in cmdline-tools/latest/bin, "
+        "or in any build-tools package.")
+endif()
+
+find_program(JAVAC_EXECUTABLE javac REQUIRED)
+find_program(JAR_EXECUTABLE jar REQUIRED)
+
+set(AGENT_JAVA_SOURCES
+    agent/java/keystork/Agent.java
+    agent/java/keystork/Blank.java
+    agent/java/keystork/Loader.java
+    agent/java/keystork/Shell.java)
+set(DEX_DIR "${CMAKE_CURRENT_BINARY_DIR}/gen/dex")
+set(AGENT_DEX "${DEX_DIR}/classes.dex")
+
+# javac then jar then d8, rather than handing d8 the class files directly: a
+# source file can produce any number of them once there are nested or
+# anonymous classes, and only the jar collects those without CMake having to
+# predict their names.
+#
+# -source/-target rather than --release, which javac refuses alongside the
+# android.jar bootclasspath this needs. 17 is well inside what d8 accepts
+# whatever JDK happens to be installed.
+add_custom_command(
+    OUTPUT "${AGENT_DEX}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${DEX_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DEX_DIR}/classes"
+    COMMAND "${JAVAC_EXECUTABLE}" -source 17 -target 17 -Xlint:-options -nowarn
+            -classpath "${ANDROID_JAR}" -d "${DEX_DIR}/classes" ${AGENT_JAVA_SOURCES}
+    COMMAND "${JAR_EXECUTABLE}" --create --file "${DEX_DIR}/classes.jar"
+            -C "${DEX_DIR}/classes" .
+    COMMAND "${D8_EXECUTABLE}" --min-api ${ANDROID_PLATFORM_LEVEL}
+            --output "${DEX_DIR}" "${DEX_DIR}/classes.jar"
+    DEPENDS ${AGENT_JAVA_SOURCES}
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "compiling the agent's dex against ${KEYSTORK_PLATFORM}"
+    VERBATIM)
+
+set(DEX_BLOB "${CMAKE_CURRENT_BINARY_DIR}/gen/dex_blob.S")
+add_custom_command(
+    OUTPUT "${DEX_BLOB}"
+    COMMAND "${CMAKE_COMMAND}" "-DBLOB=${AGENT_DEX}" "-DSYMBOL=kKeystorkDex"
+            "-DOUTPUT=${DEX_BLOB}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
+    DEPENDS "${AGENT_DEX}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
+    COMMENT "embedding the dex into the agent"
+    VERBATIM)
+
+# ---------------------------------------------------------------------------
 # The injected agent
 #
 # Built for the same ABI as the daemon, then embedded in it. Nothing is ever
@@ -222,7 +311,7 @@ target_compile_options(keystore_aidl PRIVATE -w)
 # label of its own.
 # ---------------------------------------------------------------------------
 
-add_library(keystork_agent SHARED agent/agent.c)
+add_library(keystork_agent SHARED agent/agent.c "${DEX_BLOB}")
 set_target_properties(keystork_agent PROPERTIES OUTPUT_NAME keystork-agent)
 target_compile_options(keystork_agent PRIVATE -Wall -Wextra -fvisibility=hidden)
 # -s here rather than a POST_BUILD strip: what gets embedded is whatever the
@@ -233,11 +322,10 @@ target_link_libraries(keystork_agent PRIVATE log)
 set(AGENT_BLOB "${CMAKE_CURRENT_BINARY_DIR}/gen/agent_blob.S")
 add_custom_command(
     OUTPUT "${AGENT_BLOB}"
-    COMMAND "${CMAKE_COMMAND}"
-            "-DAGENT=$<TARGET_FILE:keystork_agent>"
-            "-DOUTPUT=${AGENT_BLOB}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_agent.cmake"
-    DEPENDS keystork_agent "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_agent.cmake"
+    COMMAND "${CMAKE_COMMAND}" "-DBLOB=$<TARGET_FILE:keystork_agent>"
+            "-DSYMBOL=kKeystorkAgent" "-DOUTPUT=${AGENT_BLOB}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
+    DEPENDS keystork_agent "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
     COMMENT "embedding $<TARGET_FILE_NAME:keystork_agent> into the daemon"
     VERBATIM)
 

@@ -189,6 +189,20 @@ message InjectResponse {
   int32 exit_status = 5;
   int32 fault_signal = 6;
   uint64 fault_address = 7;
+
+  // The second stage: once the runtime has settled the daemon steps the
+  // target to a landmark and calls the agent's keystork_arm, still with the
+  // process stopped. What that returned, and how many syscalls it took to
+  // reach the landmark -- the latter being the cost of the stepping.
+  optional int32 arm_result = 8;
+  optional uint32 arm_steps = 9;
+
+  // The third stage: the daemon lets the main thread run up to the message
+  // carrying the app's bind data and, before it is dispatched, has the agent
+  // take the app's own code off every classpath in the process. What that
+  // returned, and how many further syscalls the stepping cost.
+  optional int32 bind_result = 10;
+  optional uint32 bind_steps = 11;
 }
 
 // Reads part of a file, always as root -- which is why this is a top-level

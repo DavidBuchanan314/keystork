@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -93,6 +95,93 @@ void SpawnAndWait(const std::vector<std::string>& argv) {
   }
 }
 
+// Runs a helper and hands back what it printed. Same shape as SpawnAndWait,
+// with stdout on a pipe -- the one thing here whose *output* matters.
+std::string SpawnAndRead(const std::vector<std::string>& argv) {
+  int pipes[2] = {-1, -1};
+  if (::pipe2(pipes, O_CLOEXEC) != 0) return "";
+
+  std::vector<char*> raw;
+  raw.reserve(argv.size() + 1);
+  for (const std::string& word : argv) raw.push_back(const_cast<char*>(word.c_str()));
+  raw.push_back(nullptr);
+
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(pipes[0]);
+    ::close(pipes[1]);
+    return "";
+  }
+  if (pid == 0) {
+    ::signal(SIGPIPE, SIG_DFL);
+    const int null_fd = ::open("/dev/null", O_RDWR);
+    if (null_fd >= 0) {
+      ::dup2(null_fd, STDIN_FILENO);
+      ::dup2(null_fd, STDERR_FILENO);
+      if (null_fd > STDERR_FILENO) ::close(null_fd);
+    }
+    ::dup2(pipes[1], STDOUT_FILENO);
+    ::execv(raw[0], raw.data());
+    ::_exit(127);
+  }
+
+  ::close(pipes[1]);
+  std::string output;
+  char chunk[512];
+  for (;;) {
+    const ssize_t got = ::read(pipes[0], chunk, sizeof(chunk));
+    if (got > 0) {
+      output.append(chunk, static_cast<size_t>(got));
+      continue;
+    }
+    if (got < 0 && errno == EINTR) continue;
+    break;
+  }
+  ::close(pipes[0]);
+
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+  return output;
+}
+
+// What `am start` would launch for a package: the flattened
+// "package/class" the package manager resolves the launcher intent to.
+//
+// Resolved here rather than inside the shell line that starts it, because the
+// class half is needed twice over -- `am` wants it, and so does the agent,
+// which has to answer for that name once the app's own classes are gone.
+bool ResolveLaunchActivity(const std::string& package, std::string* component,
+                           std::string* activity_class, std::string* error) {
+  const std::string said =
+      SpawnAndRead({"/system/bin/cmd", "package", "resolve-activity", "--brief", package});
+
+  // Two lines on a hit, the flattened component last; a miss says so in prose,
+  // which has no '/' in it and falls out below.
+  std::string last;
+  size_t at = 0;
+  while (at < said.size()) {
+    const size_t end = said.find('\n', at);
+    const std::string line = said.substr(at, end == std::string::npos ? end : end - at);
+    if (!line.empty()) last = line;
+    if (end == std::string::npos) break;
+    at = end + 1;
+  }
+
+  const size_t slash = last.find('/');
+  if (slash == std::string::npos || slash + 1 >= last.size()) {
+    *error = "no launchable activity for " + package + " (resolve-activity said \"" + last + "\")";
+    return false;
+  }
+
+  *component = last;
+  *activity_class = last.substr(slash + 1);
+  // The manifest form: a leading dot means the package's own namespace, and
+  // the class the framework will ask for is the expanded one.
+  if ((*activity_class)[0] == '.') *activity_class = last.substr(0, slash) + *activity_class;
+  return true;
+}
+
 // The 64-bit zygote, by name. Not webview_zygote, which is a separate pool
 // that forks its own thing, and not the 32-bit one, which is out of scope.
 pid_t FindZygote() {
@@ -119,12 +208,17 @@ pid_t FindZygote() {
   return found;
 }
 
-// Where in the target to call, and what to tell the linker the caller was.
-struct Loader {
+// An entry point in the target, and what to tell the linker the caller was.
+struct Entry {
   uint64_t function = 0;
   uint64_t caller = 0;
   bool takes_caller = false;
   std::string symbol;
+};
+
+struct Candidate {
+  const char* symbol;
+  bool takes_caller;
 };
 
 // Turns a symbol resolved in this process into the same symbol in `pid`, by
@@ -139,24 +233,16 @@ bool Relocate(pid_t pid, void* local_symbol, uint64_t* remote, std::string* modu
   return true;
 }
 
-// The linker decides which namespace a dlopen runs in from the *caller's*
-// address, and a call driven by ptrace has no caller -- our LR points at a
-// PROT_NONE trap page. __loader_android_dlopen_ext exists precisely so the
-// caller can be stated outright, so it is the one to want. Falling back to the
-// public entry point means whatever the linker infers from that trap address,
-// which may or may not be the namespace the library needs.
-bool ResolveLoader(pid_t pid, Loader* out, std::string* error) {
-  struct Candidate {
-    const char* symbol;
-    bool takes_caller;
-  };
-  static const Candidate kCandidates[] = {
-      {"__loader_android_dlopen_ext", true},
-      {"android_dlopen_ext", false},
-  };
-
-  for (const Candidate& candidate : kCandidates) {
-    void* local = ::dlsym(RTLD_DEFAULT, candidate.symbol);
+// The linker decides which namespace a dlopen or dlsym runs in from the
+// *caller's* address, and a call driven by ptrace has no caller -- our LR
+// points at a PROT_NONE trap page. The __loader_ forms exist precisely so the
+// caller can be stated outright, so they are the ones to want. Falling back to
+// the public entry point means whatever the linker infers from that trap
+// address, which may or may not be the namespace the library needs.
+bool ResolveEntry(pid_t pid, const Candidate* candidates, size_t count, Entry* out,
+                  std::string* error) {
+  for (size_t i = 0; i < count; i++) {
+    void* local = ::dlsym(RTLD_DEFAULT, candidates[i].symbol);
     if (local == nullptr) continue;
 
     std::string module;
@@ -164,24 +250,27 @@ bool ResolveLoader(pid_t pid, Loader* out, std::string* error) {
     if (!Relocate(pid, local, &remote, &module)) continue;
 
     out->function = remote;
-    out->takes_caller = candidate.takes_caller;
-    out->symbol = candidate.symbol;
+    out->takes_caller = candidates[i].takes_caller;
+    out->symbol = candidates[i].symbol;
 
     // Any address inside a real library will do: the linker only uses it to
     // find the soinfo that owns it, and libc is in the default namespace,
     // which is all there is this early.
-    if (candidate.takes_caller && !FindModuleBase(pid, "/libc.so", &out->caller)) {
+    if (out->takes_caller && !FindModuleBase(pid, "/libc.so", &out->caller)) {
       out->takes_caller = false;
     }
-    KS_LOGI("dlopen entry point %s from %s at %#llx (caller %#llx)", candidate.symbol,
-            module.c_str(), static_cast<unsigned long long>(out->function),
+    KS_LOGI("%s from %s at %#llx (caller %#llx)", candidates[i].symbol, module.c_str(),
+            static_cast<unsigned long long>(out->function),
             static_cast<unsigned long long>(out->caller));
     return true;
   }
-
-  *error = "no android_dlopen_ext entry point could be resolved";
+  *error = std::string("could not resolve ") + candidates[0].symbol + " or its fallbacks";
   return false;
 }
+
+constexpr Candidate kDlopenExt[] = {{"__loader_android_dlopen_ext", true},
+                                    {"android_dlopen_ext", false}};
+constexpr Candidate kDlsym[] = {{"__loader_dlsym", true}, {"dlsym", false}};
 
 // Asks the target what went wrong, since dlerror's message lives over there.
 std::string RemoteDlerror(pid_t pid, Tracee* tracee, Borrow* borrow) {
@@ -275,8 +364,8 @@ bool InjectAgent(pid_t pid, pb::InjectResponse* response, std::string* error) {
   extinfo.library_fd = static_cast<int>(fd);
   tracee.WriteMemory(scratch + kExtInfoAt, &extinfo, sizeof(extinfo));
 
-  Loader loader;
-  if (!ResolveLoader(pid, &loader, error)) return false;
+  Entry loader;
+  if (!ResolveEntry(pid, kDlopenExt, std::size(kDlopenExt), &loader, error)) return false;
 
   if (!tracee.ok()) {
     *error = tracee.error();
@@ -299,10 +388,12 @@ bool InjectAgent(pid_t pid, pb::InjectResponse* response, std::string* error) {
         KS_LOGE("the linker refused the agent: %s",
                 reason.empty() ? "(no dlerror)" : reason.c_str());
       }
-      // Only reachable when the agent did not _exit, so there is still a
-      // process to tidy up after.
+      // The linker has mapped what it needs, so the descriptor can go. The
+      // scratch page deliberately stays: the library name lived in it, and
+      // bionic is believed to copy that rather than retain the pointer, but
+      // being wrong would mean the app crashing on some later dl_iterate_phdr
+      // rather than here. One page is not worth that.
       borrow.Syscall(SYS_close, fd);
-      borrow.Syscall(SYS_munmap, static_cast<uint64_t>(scratch), page);
       break;
 
     case CallResult::Outcome::kExited:
@@ -325,6 +416,229 @@ bool InjectAgent(pid_t pid, pb::InjectResponse* response, std::string* error) {
   return true;
 }
 
+// ioctl(_, BINDER_SET_MAX_THREADS) -- _IOW('b', 5, __u32). ProcessState's
+// constructor issues this from open_driver(), reached from
+// AppRuntime::onZygoteInit via ZygoteInit.nativeZygoteInit. That places it
+// after postForkChild -- so ART has done DidForkFromZygote and has its daemon
+// threads -- and before RuntimeInit.applicationInit, which is what produces
+// the Runnable that invokes ActivityThread.main. The zygote itself never
+// builds a ProcessState, so the child's really is the first.
+constexpr uint64_t kBinderSetMaxThreads = 0x40046205;
+
+// What a landmark looks like from a syscall-*entry* stop: the registers are
+// the tracee's own, and the Tracee is there for reading whatever they point
+// at. True means "this is the syscall we were waiting for", and stepping then
+// stops at its exit.
+using Landmark = std::function<bool(Tracee&, const user_regs_struct&)>;
+
+// The simple kind: a syscall number and one register.
+Landmark SyscallArgumentIs(long number, int index, uint64_t value) {
+  return [number, index, value](Tracee&, const user_regs_struct& registers) {
+    return static_cast<long>(registers.regs[8]) == number && registers.regs[index] == value;
+  };
+}
+
+// The main looper polling. MessageQueue.next() calls nativePollOnce before it
+// dequeues anything, so a stop at the exit of one of these is a moment when a
+// message that has arrived is on the queue and has not been dispatched --
+// which is the whole window stage three needs.
+//
+// bionic's epoll_wait is epoll_pwait on aarch64; epoll_pwait2 is matched too
+// so that a libc which switches does not silently stop matching.
+Landmark IsLooperPoll() {
+  return [](Tracee&, const user_regs_struct& registers) {
+    const long number = static_cast<long>(registers.regs[8]);
+    return number == SYS_epoll_pwait
+#ifdef SYS_epoll_pwait2
+           || number == SYS_epoll_pwait2
+#endif
+        ;
+  };
+}
+
+// Runs the target forward until it is stopped at the *exit* of the first
+// syscall the landmark claims -- an exit stop being somewhere safe to borrow
+// the thread from.
+//
+// Signals are forwarded rather than swallowed: ART uses SIGSEGV for its
+// implicit null and stack-overflow checks, so eating one during startup would
+// kill the process outright.
+bool StepToSyscallExit(pid_t pid, const Landmark& landmark, int64_t deadline, int* steps,
+                       std::string* error) {
+  Tracee looking(pid);
+  bool at_entry = true;
+  bool claiming = false;
+  int pending = 0;
+  *steps = 0;
+
+  for (;;) {
+    if (NowMs() > deadline || g_deadline_passed) {
+      *error = "gave up after " + std::to_string(*steps) + " syscalls waiting for the runtime";
+      return false;
+    }
+    if (::ptrace(PTRACE_SYSCALL, pid, nullptr,
+                 reinterpret_cast<void*>(static_cast<long>(pending))) != 0) {
+      *error = std::string("could not step ") + std::to_string(pid) + ": " + ::strerror(errno);
+      return false;
+    }
+    pending = 0;
+
+    int status = 0;
+    if (::waitpid(pid, &status, __WALL) < 0) {
+      if (errno == EINTR) continue;
+      *error = std::string("waitpid failed while stepping: ") + ::strerror(errno);
+      return false;
+    }
+    if (!WIFSTOPPED(status)) {
+      *error = "the target exited while stepping to the runtime landmark";
+      return false;
+    }
+
+    const int signal = WSTOPSIG(status);
+    if (signal != kSyscallTrap) {
+      pending = (signal == SIGTRAP || signal == SIGSTOP) ? 0 : signal;
+      continue;
+    }
+    if (claiming) return true;
+
+    if (at_entry) {
+      user_regs_struct registers{};
+      if (looking.ReadRegisters(&registers) && landmark(looking, registers)) claiming = true;
+    }
+    at_entry = !at_entry;
+    (*steps)++;
+  }
+}
+
+// An entry point of the agent's, resolved through the target's own dlsym on
+// the handle dlopen gave back -- cheaper and more certain than working out
+// what a memfd mapping ended up being called.
+//
+// Done once per symbol and kept, because the calls that follow happen with the
+// target stopped at places we have stepped it to, and resolving there would
+// mean a scratch mapping at each one.
+bool RemoteSymbol(pid_t pid, uint64_t handle, const char* symbol, uint64_t* address,
+                  std::string* error) {
+  Tracee tracee(pid);
+  Borrow borrow(&tracee);
+
+  const auto page = static_cast<size_t>(::getpagesize());
+  const int64_t scratch = borrow.Syscall(SYS_mmap, 0, page, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, static_cast<uint64_t>(-1), 0);
+  if (SyscallFailed(scratch)) {
+    *error = std::string("could not map scratch to resolve ") + symbol + ": " +
+             ::strerror(static_cast<int>(-scratch));
+    return false;
+  }
+
+  if (!tracee.WriteMemory(scratch, symbol, ::strlen(symbol) + 1)) {
+    *error = tracee.error();
+    return false;
+  }
+
+  Entry dlsym_entry;
+  if (!ResolveEntry(pid, kDlsym, std::size(kDlsym), &dlsym_entry, error)) return false;
+
+  const CallResult found =
+      dlsym_entry.takes_caller
+          ? borrow.Call(dlsym_entry.function, handle, scratch, dlsym_entry.caller)
+          : borrow.Call(dlsym_entry.function, handle, scratch);
+  borrow.Syscall(SYS_munmap, static_cast<uint64_t>(scratch), page);
+
+  if (!found.returned() || found.value == 0) {
+    *error = std::string("dlsym(") + symbol + ") in the target " + Describe(found);
+    return false;
+  }
+  KS_LOGI("%s at %#llx", symbol, static_cast<unsigned long long>(found.value));
+  *address = found.value;
+  return tracee.ok() ? true : (*error = tracee.error(), false);
+}
+
+// Calls one of the agent's entry points in the stopped target and hands back
+// what it returned.
+bool CallAgent(pid_t pid, uint64_t function, const char* symbol, uint64_t argument,
+               int* agent_result, std::string* error) {
+  Tracee tracee(pid);
+  Borrow borrow(&tracee);
+
+  const CallResult called = borrow.Call(function, argument);
+  if (!called.returned()) {
+    *error = std::string(symbol) + " " + Describe(called);
+    return false;
+  }
+  *agent_result = static_cast<int>(static_cast<int32_t>(called.value));
+  return tracee.ok() ? true : (*error = tracee.error(), false);
+}
+
+// How many times to let the main looper poll before giving up on the bind
+// arriving. The system server sends it during attachApplication, so in
+// practice it is there at the first or second poll; this only bounds a wrong
+// guess about that.
+constexpr int kMaxLooperPolls = 64;
+
+// Stage three: stop the main thread each time it polls, and ask the agent
+// whether the app's bind data has arrived yet. The agent does the surgery the
+// moment it can see it -- with the process stopped, before the message has
+// been dispatched, so nothing about it is a race.
+bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class, int64_t deadline,
+                   uint32_t* steps_taken, int* agent_result, std::string* error) {
+  uint64_t entry = 0;
+  if (!RemoteSymbol(pid, handle, "keystork_bind", &entry, error)) return false;
+
+  // The class name has to be readable in the target at each call, and the
+  // calls happen wherever the stepping stopped -- so it is mapped once, here,
+  // rather than at every one of them.
+  const auto page = static_cast<size_t>(::getpagesize());
+  uint64_t scratch = 0;
+  {
+    Tracee tracee(pid);
+    Borrow borrow(&tracee);
+    const int64_t mapped =
+        borrow.Syscall(SYS_mmap, 0, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                       static_cast<uint64_t>(-1), 0);
+    if (SyscallFailed(mapped)) {
+      *error = std::string("could not map scratch for the launch component: ") +
+               ::strerror(static_cast<int>(-mapped));
+      return false;
+    }
+    scratch = static_cast<uint64_t>(mapped);
+    if (!tracee.WriteMemory(scratch, activity_class.c_str(), activity_class.size() + 1)) {
+      *error = tracee.error();
+      return false;
+    }
+  }
+
+  int total = 0;
+  for (int poll = 1; poll <= kMaxLooperPolls; poll++) {
+    int steps = 0;
+    if (!StepToSyscallExit(pid, IsLooperPoll(), deadline, &steps, error)) return false;
+    total += steps;
+
+    int said = 0;
+    if (!CallAgent(pid, entry, "keystork_bind", scratch, &said, error)) return false;
+    if (said < 0) {
+      *error = "keystork_bind failed (" + std::to_string(said) + "); see logcat";
+      return false;
+    }
+    if (said > 0) {
+      KS_LOGI("took the app's own code off the classpath at poll %d, %d syscalls past the arm",
+              poll, total);
+      // Nothing of ours should be left mapped in a process that carries on
+      // living; the agent has copied the name into a Java String by now.
+      Tracee tracee(pid);
+      Borrow borrow(&tracee);
+      borrow.Syscall(SYS_munmap, scratch, page);
+
+      *steps_taken = static_cast<uint32_t>(total);
+      *agent_result = said;
+      return true;
+    }
+  }
+  *error = "the app's bind data never reached the main thread in " +
+           std::to_string(kMaxLooperPolls) + " polls";
+  return false;
+}
+
 // Per forked child, while we work out whether it is the one we want.
 struct Child {
   bool stepping = false;   // past its initial SIGSTOP
@@ -343,17 +657,11 @@ void LetGo(pid_t pid) { ::ptrace(PTRACE_DETACH, pid, nullptr, nullptr); }
 // later during specialization. Stepping it to the setresuid is what turns it
 // from "a fork" into "the target", and doing so at a syscall *exit* stop is
 // what leaves it somewhere safe to hijack.
-pid_t CatchTarget(pid_t zygote, uid_t uid, const std::string& package, int timeout_ms,
-                  std::string* error) {
-  // Resolving the launcher activity here rather than in the client keeps this
-  // to one spawn, and `am` is not itself a zygote child -- it execs
-  // app_process, which starts a runtime of its own -- so it cannot be confused
-  // for the app.
-  const pid_t launcher =
-      Spawn({"/system/bin/sh", "-c",
-             "exec /system/bin/am start -n \"$(/system/bin/cmd package resolve-activity "
-             "--brief " +
-                 package + " | tail -1)\""});
+pid_t CatchTarget(pid_t zygote, uid_t uid, const std::string& package,
+                  const std::string& component, int timeout_ms, std::string* error) {
+  // `am` is not itself a zygote child -- it execs app_process, which starts a
+  // runtime of its own -- so it can never be confused for the app.
+  const pid_t launcher = Spawn({"/system/bin/am", "start", "-n", component});
   if (launcher < 0) {
     *error = "could not launch " + package;
     return -1;
@@ -397,16 +705,28 @@ pid_t CatchTarget(pid_t zygote, uid_t uid, const std::string& package, int timeo
     if (stopped == launcher) continue;
 
     if (stopped == zygote) {
-      if (WIFSTOPPED(status) && status >> 8 == (SIGTRAP | (PTRACE_EVENT_FORK << 8))) {
+      // The zygote's own signals are its business and must be handed back. It
+      // reaps the processes it forks off SIGCHLD, so swallowing one -- which
+      // resuming with 0 does -- leaves an app that died during our window as a
+      // zombie for as long as the device is up. An event stop is not a signal
+      // and gets 0; a signal-delivery stop gets its signal.
+      const int event = (status >> 16) & 0xff;
+      int forward = 0;
+
+      if (event == PTRACE_EVENT_FORK) {
         unsigned long forked = 0;
         if (::ptrace(PTRACE_GETEVENTMSG, zygote, nullptr, &forked) == 0) {
           children.emplace(static_cast<pid_t>(forked), Child{});
           KS_LOGI("zygote forked %lu", forked);
         }
+      } else if (event == 0 && WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP) {
+        forward = WSTOPSIG(status);
       }
+
       // Straight back to work: while the zygote is stopped, every app launch
       // on the device is queued behind this loop.
-      ::ptrace(PTRACE_CONT, zygote, nullptr, nullptr);
+      ::ptrace(PTRACE_CONT, zygote, nullptr,
+               reinterpret_cast<void*>(static_cast<long>(forward)));
       continue;
     }
 
@@ -513,6 +833,18 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
   }
   KS_LOGI("zygote64 is pid %d", zygote);
 
+  // Resolved before anything is disturbed: the class half is what the agent
+  // has to answer for once the app's own classes are off the classpath, and a
+  // package with nothing launchable should say so before we stop it.
+  std::string error;
+  std::string component;
+  std::string activity_class;
+  if (!ResolveLaunchActivity(request.package(), &component, &activity_class, &error)) {
+    FillIdentityError(error, 0, response->mutable_error());
+    return;
+  }
+  KS_LOGI("launching %s; the agent answers for %s", component.c_str(), activity_class.c_str());
+
   // Without this a warm process just receives the intent and nothing forks.
   SpawnAndWait({"/system/bin/am", "force-stop", request.package()});
 
@@ -524,8 +856,8 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
     return;
   }
 
-  std::string error;
-  const pid_t target = CatchTarget(zygote, uid, request.package(), timeout_ms, &error);
+  const pid_t target =
+      CatchTarget(zygote, uid, request.package(), component, timeout_ms, &error);
 
   // Let go the moment we have what we came for; nothing else on the device can
   // start an app until we do.
@@ -540,12 +872,56 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
   result->set_pid(target);
   result->set_uid(uid);
 
-  const bool injected = InjectAgent(target, result, &error);
+  bool injected = InjectAgent(target, result, &error);
+
+  // Second stage. Still attached, so none of this races the app: the target is
+  // stopped except while running exactly the function we asked it to.
+  if (injected && result->outcome() == pb::InjectResponse::RETURNED && result->handle() != 0) {
+    int steps = 0;
+    const int64_t deadline = NowMs() + timeout_ms;
+    if (!StepToSyscallExit(target, SyscallArgumentIs(SYS_ioctl, 1, kBinderSetMaxThreads), deadline,
+                           &steps, &error)) {
+      injected = false;
+    } else {
+      result->set_arm_steps(static_cast<uint32_t>(steps));
+      KS_LOGI("reached the binder threadpool setup after %d syscalls", steps);
+
+      uint64_t arm = 0;
+      int agent_result = 0;
+      if (!RemoteSymbol(target, result->handle(), "keystork_arm", &arm, &error) ||
+          !CallAgent(target, arm, "keystork_arm", 0, &agent_result, &error)) {
+        injected = false;
+      } else {
+        result->set_arm_result(agent_result);
+        KS_LOGI("keystork_arm -> %d", agent_result);
+
+        // Third stage: the bind. Everything the app would have run is named in
+        // a message that has not been dispatched yet.
+        uint32_t bind_steps = 0;
+        int bind_result = 0;
+        if (!InterceptBind(target, result->handle(), activity_class, deadline, &bind_steps,
+                           &bind_result, &error)) {
+          injected = false;
+        } else {
+          result->set_bind_steps(bind_steps);
+          result->set_bind_result(bind_result);
+        }
+      }
+    }
+  }
+
+  // Resumes it wherever it was stopped, with its own registers back.
+  // Specialization or startup carries on and the app boots. EXITKILL goes with
+  // the ptrace relationship, so detaching is also what stops this connection
+  // ending from taking the app with it.
   ::ptrace(PTRACE_DETACH, target, nullptr, nullptr);
 
-  // The process died during startup, so AMS will want to restart it. This is
-  // what stops that becoming a loop.
-  SpawnAndWait({"/system/bin/am", "force-stop", request.package()});
+  // Only when the process did not survive: AMS would otherwise keep restarting
+  // something that dies every time. A process that came back from dlopen is
+  // meant to carry on booting, and force-stopping it would undo the point.
+  if (!injected || result->outcome() != pb::InjectResponse::RETURNED) {
+    SpawnAndWait({"/system/bin/am", "force-stop", request.package()});
+  }
 
   if (!injected) {
     KS_LOGE("injection into %d failed: %s", target, error.c_str());

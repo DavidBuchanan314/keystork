@@ -115,6 +115,12 @@ size_t LocalSyscallOffset(size_t* vdso_length) {
   return cached_offset;
 }
 
+// A syscall stop is SIGTRAP|0x80 when PTRACE_O_TRACESYSGOOD is set on the
+// tracee and a plain SIGTRAP when it is not. Both are accepted here, because
+// the options belong to whoever owns the ptrace relationship rather than to
+// this file.
+constexpr int kSyscallTrap = SIGTRAP | 0x80;
+
 // Waits for the next stop, retrying through EINTR. False means the tracee is
 // gone rather than stopped.
 bool WaitForStop(pid_t tid, int* status) {
@@ -320,7 +326,9 @@ CallResult Borrow::Call(uint64_t function, uint64_t a0, uint64_t a1, uint64_t a2
   // a crash handler -- would walk a chain of nonsense. End it here instead.
   registers.regs[29] = 0;
   registers.regs[30] = return_trap_;
-  registers.sp = stack_top_;
+  // The trap page is wanted either way; the megabyte below it only when the
+  // caller has asked for it. See Borrow::UsePrivateStack.
+  registers.sp = private_stack_ ? stack_top_ : (saved_.sp & ~UINT64_C(15));
   registers.pc = function;
 
   if (!SetRegisters(tracee_->tid(), registers)) {
@@ -354,7 +362,11 @@ CallResult Borrow::Call(uint64_t function, uint64_t a0, uint64_t a1, uint64_t a2
     }
 
     const int signal = WSTOPSIG(status);
-    if (signal != SIGSEGV && signal != SIGBUS && signal != SIGILL && signal != SIGTRAP) {
+    // SIGSYS belongs here rather than below: the called code hitting a
+    // seccomp-blocked syscall is that code failing, and forwarding it would
+    // kill the target instead of reporting where.
+    if (signal != SIGSEGV && signal != SIGBUS && signal != SIGILL && signal != SIGTRAP &&
+        signal != SIGSYS) {
       // Somebody else's signal. Hand it back rather than swallow it -- the
       // tracee is entitled to whatever it would have done with it.
       deliver = signal;
@@ -431,6 +443,27 @@ int64_t Borrow::Syscall(long number, uint64_t a0, uint64_t a1, uint64_t a2, uint
                     std::to_string(number) + " (status " + std::to_string(status) + ")");
       return -1;
     }
+
+    // It has to be *our* syscall's stop. x0 at any other kind of stop means
+    // something entirely different, and reading it as a result would turn a
+    // refused syscall into a plausible-looking address.
+    const int signal = WSTOPSIG(status);
+    if (signal == kSyscallTrap || signal == SIGTRAP) continue;
+
+    if (signal == SIGSYS) {
+      // Real, not theoretical: the zygote installs an app's seccomp filter
+      // before it drops the UID -- the filter needs CAP_SYS_ADMIN -- so a
+      // process caught during specialization is already filtered.
+      tracee_->Fail("syscall " + std::to_string(number) + " in " +
+                    std::to_string(tracee_->tid()) + " was refused by seccomp");
+    } else {
+      // Deliberately fatal rather than forwarded. Injecting a signal here
+      // would run its handler, and a handler makes syscalls of its own, which
+      // would arrive as the stops this is counting.
+      tracee_->Fail("expected a syscall stop for " + std::to_string(number) + " in " +
+                    std::to_string(tracee_->tid()) + ", got signal " + std::to_string(signal));
+    }
+    return -1;
   }
 
   if (!GetRegisters(tracee_->tid(), &registers)) {

@@ -601,7 +601,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if result.handle == 0:
                     print("the linker refused the agent; see logcat -s keystorkd", file=sys.stderr)
                     return 1
-            elif outcome == "EXITED":
+            if result.HasField("arm_steps"):
+                print(f"arm steps {result.arm_steps}")
+            if result.HasField("arm_result"):
+                print(f"arm       {result.arm_result}")
+            if result.HasField("bind_steps"):
+                print(f"bind steps {result.bind_steps}")
+            if result.HasField("bind_result"):
+                print(f"bind      {result.bind_result}")
+            if outcome == "EXITED":
                 print(f"exit      {result.exit_status}")
             elif outcome == "FAULTED":
                 print(f"fault     signal {result.fault_signal} at {result.fault_address:#x}")
