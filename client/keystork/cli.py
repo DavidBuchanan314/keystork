@@ -13,6 +13,7 @@ hex string instead. Parameters left unset are read from the key itself.
 from __future__ import annotations
 
 import argparse
+import base64
 import binascii
 import os
 import sys
@@ -26,12 +27,10 @@ from .session import (
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
     DEVICE_SHELL,
-    Connection,
     Device,
     KeyDescriptor,
     KeyMetadata,
     KeystoreSession,
-    kill_server,
     nonce_length,
 )
 
@@ -536,7 +535,7 @@ def _run_process(device: Device, args: argparse.Namespace, path: str, argv: List
         env.append("TERM=" + os.environ.get("TERM", "xterm-256color"))
     rows, cols = local_window()
 
-    connection = Connection(device)
+    connection = device.connect()
     try:
         uid = args.uid
         if args.package is not None:
@@ -591,26 +590,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         if args.command == "kill-server":
-            kill_server(device)
+            with device.connect() as connection:
+                connection.kill_server()
             if args.verbose:
                 print(f"stopped keystorkd on {device}", file=sys.stderr)
             return 0
 
         if args.command == "read-file":
-            with Connection(device) as connection:
+            with device.connect() as connection:
                 data = connection.read_file(args.path, offset=args.offset, length=args.length)
             _write_output(data, args.out, args.hex)
             return 0
 
         if args.command == "packages":
-            with Connection(device) as connection:
+            with device.connect() as connection:
                 packages = connection.packages()
             for name in sorted(packages):
                 print(f"{packages[name]}\t{name}")
             return 0
 
         if args.command == "integrity":
-            with Connection(device) as connection:
+            with device.connect() as connection:
                 with connection.open_integrity_session(
                     args.package, uid=args.uid, user=args.user, timeout_ms=args.timeout_ms
                 ) as integrity:
@@ -634,7 +634,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         if args.standard is not None:
                             print(integrity.standard(args.standard))
                         else:
-                            nonce = args.nonce if args.nonce is not None else os.urandom(32)
+                            # A nonce given on the command line goes to the API
+                            # exactly as typed; only the generated one is
+                            # encoded here, and it says so on stderr under -v
+                            # so the value can be checked against the verdict.
+                            nonce = args.nonce
+                            if nonce is None:
+                                nonce = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+                                if args.verbose:
+                                    print(f"nonce {nonce}", file=sys.stderr)
                             print(
                                 integrity.classic(
                                     nonce, cloud_project_number=args.cloud_project
@@ -657,18 +665,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.interactive_default = False
             return _run_process(device, args, args.path, [args.path] + args.args)
 
-        with KeystoreSession(
-            args.uid, device, package=args.package, user=args.user
-        ) as session:
-            if args.verbose:
-                who = f"uid={session.uid}"
-                if session.package is not None:
-                    who = f"{session.package} {who}"
-                print(
-                    f"session {who}, keystore2 interface V{session.interface_version}",
-                    file=sys.stderr,
-                )
-            return _run(session, args)
+        with device.connect() as connection:
+            with connection.open_keystore_session(
+                args.uid, package=args.package, user=args.user
+            ) as session:
+                if args.verbose:
+                    who = f"uid={session.uid}"
+                    if session.package is not None:
+                        who = f"{session.package} {who}"
+                    print(
+                        f"session {who}, keystore2 interface V{session.interface_version}",
+                        file=sys.stderr,
+                    )
+                return _run(session, args)
     except errors.KeystorkError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

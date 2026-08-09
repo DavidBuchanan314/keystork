@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Drive a remote Android device's keystore2 over IP"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "../LICENSE" }
+#license = { file = "../LICENSE" } # the relative load is broken
 dependencies = [
     # Generated with protoc 3.19.6; the generated module asserts on a runtime
     # older than its generator.

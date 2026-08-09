@@ -49,6 +49,12 @@ class FrameBuffer {
 
   bool over_limit() const { return over_limit_; }
 
+  // Bytes appended but not yet part of a whole frame. Whoever stops using a
+  // FrameBuffer mid-stream has to take these with them: they were read off the
+  // socket and are gone from it, so dropping them would silently eat whatever
+  // the peer sent next.
+  std::string Rest() const { return buffer_.substr(head_); }
+
  private:
   std::string buffer_;
   size_t head_ = 0;

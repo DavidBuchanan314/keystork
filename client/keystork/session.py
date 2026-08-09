@@ -1,14 +1,17 @@
-"""Sessions and the calls you make on them.
+"""Devices, connections, sessions, and the calls you make on them.
 
-A connection *is* a session: constructing a `Session` opens the socket, and the
-daemon forks a child that permanently drops to the session's UID, so the UID is
-fixed at handshake time and can never change. Acting as a second UID means
-opening a second session.
+A :class:`Device` is an address and nothing more; :meth:`Device.connect` is
+where the network starts; a :class:`Connection` talks to the daemon as root;
+and opening a session hands that connection over. Each step is a verb on the
+thing before it, and `Device` is the only one you construct.
+
+A session's UID is fixed when it opens -- the daemon's child drops to it before
+any Binder call, and keys are partitioned by exactly those credentials -- so
+acting as a second UID means ending the session and opening another.
 """
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import socket
 from dataclasses import dataclass, field
@@ -480,17 +483,34 @@ class Operation:
 class Device:
     """Where the daemon is, and how to reach it. Does not connect.
 
-    Immutable and reusable: one ``Device`` can open any number of sessions, and
-    holding one costs nothing. :meth:`dial` is the only thing that touches the
-    network.
+    Immutable and reusable: one ``Device`` can open any number of connections,
+    and holding one costs nothing. :meth:`connect` is where the network starts.
+
+    >>> device = keystork.Device(host="127.0.0.1", port=9432)
+    >>> with device.connect() as conn:
+    ...     with conn.open_keystore_session(uid=10123) as ks:
+    ...         ks.list()
     """
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     timeout: Optional[float] = DEFAULT_TIMEOUT
 
+    def connect(self) -> "Connection":
+        """Open a connection to the daemon, greeting and all.
+
+        The whole library is this chain: a device is an address, a connection
+        is a conversation with the daemon, and a session is a connection that
+        has been handed over. Each step is a verb on the thing before it, and
+        each is the only way to reach the next.
+        """
+        return Connection._open(self)
+
     def dial(self) -> socket.socket:
-        """Open one connection to the daemon."""
+        """Open one raw socket to the daemon, with no protocol on it.
+
+        :meth:`connect` is what you want; this is the plumbing under it.
+        """
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as exc:
@@ -544,33 +564,46 @@ class Connection:
     """A connection to the daemon, at the top level.
 
     The daemon is root here, and every exchange is one command: read a file,
-    stop the server, run a program, or open a session. Two of those are
-    irreversible -- :meth:`open_keystore_session`, because the UID drop cannot
-    be undone, and :meth:`exec`, because the connection becomes the child's
-    stdio. After either, no command is valid.
+    stop the server, run a program, or open a session. A keystore session hands
+    the connection back when it ends; :meth:`exec` and
+    :meth:`open_integrity_session` do not, because a connection carrying a
+    process's stdio or a conversation with an app has nowhere left to put a
+    command.
 
-    >>> with Connection(device) as conn:
+    :meth:`Device.connect` is the only way to get one -- a connection is a
+    device's network, so it is the device that opens it.
+
+    >>> with device.connect() as conn:
     ...     data = conn.read_file(PACKAGES_LIST)
-    ...     ks = conn.open_keystore_session(uid=10207)
-    ...     ks.list()
+    ...     with conn.open_keystore_session(uid=10207) as ks:
+    ...         ks.list()
     """
 
-    def __init__(self, device: Optional[Device] = None) -> None:
-        self._device = device or Device()
-        self._transport = Transport(self._device.dial())
-        self._session_open = False
-        self._handed_to = ""
+    def __init__(self) -> None:
+        # The name is exported for annotations and isinstance; opening one is
+        # the device's job, since the connection is the device's network.
+        raise TypeError("open a connection with Device.connect()")
+
+    @classmethod
+    def _open(cls, device: Device) -> "Connection":
+        """Dial, read the greeting, and check the version. See Device.connect."""
+        connection = cls.__new__(cls)
+        connection._device = device
+        connection._transport = Transport(device.dial())
+        connection._session_open = False
+        connection._handed_to = ""
 
         try:
-            greeting = self._transport.recv(pb.Greeting())
+            greeting = connection._transport.recv(pb.Greeting())
             if greeting.protocol_version != PROTOCOL_VERSION:
                 raise errors.ProtocolError(
                     f"daemon speaks protocol version {greeting.protocol_version}, "
                     f"this client speaks {PROTOCOL_VERSION}"
                 )
         except BaseException:
-            self._transport.close()
+            connection._transport.close()
             raise
+        return connection
 
     @property
     def device(self) -> Device:
@@ -578,8 +611,31 @@ class Connection:
 
     @property
     def session_open(self) -> bool:
-        """True once something has taken over; no command is valid after that."""
+        """True while something has taken over; no command is valid until it ends."""
         return self._session_open
+
+    def _session_ended(self) -> None:
+        """A keystore session gave the connection back, as root again."""
+        self._session_open = False
+        self._handed_to = ""
+
+    def _process_ended(self) -> None:
+        """An exec'd child exited, so its stdio is a connection again.
+
+        The daemon sends the exit last, after reaping and draining, so both
+        ends agree the stream is at a frame boundary with nothing behind it.
+        """
+        self._session_open = False
+        self._handed_to = ""
+
+    def _closed_by_process(self) -> None:
+        """A Process dropped the socket to kill a child that was still running.
+
+        That is the only way to stop one from here, and it takes the connection
+        with it -- so this connection is closed, and says so rather than
+        failing later on a socket somebody else shut.
+        """
+        self._transport.detach()
 
     def _command(self, command: pb.Command, timeout: Optional[float] = None) -> pb.CommandResponse:
         if self._session_open:
@@ -714,9 +770,131 @@ class Connection:
         started = self._command(pb.Command(exec=request)).exec
         self._session_open = True
         self._handed_to = f"the stdio of pid {started.pid}"
-        # The two directions run independently from here, so the framed
-        # request/response transport has nothing left to do.
-        return Process(self._transport.detach(), started)
+        # Borrowed rather than detached: the two directions run independently
+        # while the child lives, but its exit puts the stream back at a frame
+        # boundary, and the connection resumes at the top level.
+        return Process(self._transport.borrow(), started, self)
+
+    def run(
+        self,
+        path: str,
+        argv: Optional[Sequence[str]] = None,
+        *,
+        stdin: bytes = b"",
+        **kwargs,
+    ) -> Tuple[ExitStatus, bytes, bytes]:
+        """Run one program to completion here and collect what it said.
+
+        The bounded form of :meth:`exec`: it waits, returns
+        ``(status, stdout, stderr)`` as bytes, and leaves this connection at the
+        top level, ready for the next thing.
+
+        `kwargs` are :meth:`exec`'s -- ``uid``, ``package``, ``cwd``, ``env``
+        and the rest.
+
+        >>> with device.connect() as conn:
+        ...     status, out, err = conn.run("/system/bin/getprop", ["getprop", "ro.build.id"])
+        """
+        with self.exec(path, argv, **kwargs) as process:
+            return process.communicate(stdin)
+
+    def check_output(
+        self,
+        args: Union[str, Sequence[str]],
+        *,
+        stdin: bytes = b"",
+        **kwargs,
+    ) -> bytes:
+        """Run a program, return its stdout, and raise if it failed.
+
+        :func:`subprocess.check_output`'s bargain, and its signature: `args` is
+        an argv whose first entry is the program, or a bare string naming a
+        program that takes no arguments.
+
+        >>> with device.connect() as conn:
+        ...     conn.check_output(["/system/bin/getprop", "ro.product.model"]).strip()
+        b'SM-A075F'
+
+        **Absolute paths only.** Unlike the local one this does no PATH search,
+        because the daemon's exec is ``execve`` and nothing else -- no PATH, no
+        word splitting, no globbing. ``check_output("id")`` is an
+        :class:`~keystork.errors.IdentityError`; ``"/system/bin/id"`` is the
+        same thing spelled so that only one thing can happen.
+
+        Raises :class:`~keystork.errors.CommandFailed` on a non-zero exit or a
+        signal, carrying the status and *both* streams -- stderr is usually
+        where the reason is, and losing it is what makes this pattern annoying
+        elsewhere. A program that could not be started at all raises
+        :class:`~keystork.errors.IdentityError` instead: that happens before
+        anything ran.
+
+        :meth:`system` is the one with a shell, for when the command line is a
+        literal you typed.
+        """
+        if isinstance(args, str):
+            path, argv = args, [args]
+        else:
+            argv = list(args)
+            if not argv:
+                raise ValueError("check_output needs at least a program to run")
+            path = argv[0]
+
+        status, stdout, stderr = self.run(path, argv, stdin=stdin, **kwargs)
+        if not status.ok:
+            raise errors.CommandFailed(path, status, stdout, stderr)
+        return stdout
+
+    def system(
+        self,
+        command: str,
+        *,
+        pty: Optional[bool] = None,
+        escape: Optional[int] = ESCAPE,
+        **kwargs,
+    ) -> int:
+        """``os.system``, pointed at the device, on this connection.
+
+        Runs `command` under ``sh -c`` with the output on your own terminal --
+        captured nowhere -- and hands back the exit code, ``128 + N`` when a
+        signal killed it. The connection is usable again afterwards, so several
+        of these in a row cost one connection rather than one each:
+
+        >>> with device.connect() as conn:
+        ...     conn.system("uname -a")
+        ...     conn.system("id", package="com.android.chrome")
+
+        `command` goes to a shell, so pipes, redirection, globs, ``&&`` and
+        ``$VAR`` all mean what they look like -- and so does anything unquoted
+        that came from somewhere you do not control. Build an argv with
+        :meth:`run` when the command is not a literal you typed.
+
+        `pty` defaults to whether this process's stdin is a terminal, which is
+        what makes an inherited terminal behave like one: the child's
+        ``isatty`` is true, it gets colour, ``^C`` reaches it through the remote
+        line discipline rather than raising here, and a full-screen program
+        works. It also merges stderr into stdout, exactly as a shared terminal
+        does.
+
+        A pty is what makes `escape` matter: with one, every key including
+        ``^C`` belongs to the remote, so :data:`ESCAPE` (``^]``) is the way out
+        of something that has stopped answering. Escaping gives up on the child
+        -- which the daemon then kills -- and reports 130. **It takes the
+        connection with it**, since dropping the connection is what kills a
+        child that is no longer answering; a clean exit does not.
+        ``escape=None`` removes the hatch.
+
+        `kwargs` are :meth:`exec`'s -- ``uid``, ``package``, ``gid``, ``cwd``,
+        ``env``.
+        """
+        if pty is None:
+            pty = stdin_is_tty()
+        rows, cols = local_window()
+
+        with self.exec(
+            DEVICE_SHELL, ["sh", "-c", command], pty=pty, rows=rows, cols=cols, **kwargs
+        ) as process:
+            status = process.interact(escape=escape)
+        return 130 if status is None else status.returncode
 
     def open_integrity_session(
         self,
@@ -757,23 +935,37 @@ class Connection:
         self._handed_to = f"an integrity session with {package}"
         return IntegritySession._attach(self, package, opened)
 
-    def _open_keystore(self, uid: int) -> pb.KeystoreSessionOpened:
+    def open_keystore_session(
+        self,
+        uid: Optional[int] = None,
+        *,
+        package: Optional[str] = None,
+        user: int = 0,
+    ) -> "KeystoreSession":
+        """Become a UID and hand the connection over to a keystore session.
+
+        Name exactly one of `uid` or `package`; a package is resolved from the
+        device's package list over this same connection, while it is still
+        root, since the daemon has no notion of packages.
+
+        One-way: this connection can never open another session or run another
+        top-level command. The UID drop cannot be undone.
+        """
+        if (uid is None) == (package is None):
+            raise ValueError("name exactly one of uid or package")
+        if user < 0:
+            raise ValueError(f"user must be non-negative, got {user}")
+        if package is not None:
+            uid = self.resolve_package(package, user)
         if uid < 0:
             raise ValueError(f"uid must be non-negative, got {uid}")
+
         response = self._command(
             pb.Command(open_keystore_session=pb.OpenKeystoreSessionRequest(uid=uid))
         )
         self._session_open = True
         self._handed_to = "a keystore session"
-        return response.open_keystore_session
-
-    def open_keystore_session(self, uid: int) -> "KeystoreSession":
-        """Become `uid` and hand the connection over to a keystore session.
-
-        One-way: this connection can never open another session or run another
-        top-level command.
-        """
-        return KeystoreSession._attach(self, uid, self._open_keystore(uid), None)
+        return KeystoreSession._attach(self, uid, response.open_keystore_session, package)
 
     def close(self) -> None:
         self._transport.close()
@@ -793,146 +985,32 @@ class Connection:
         return f"<keystork.Connection {self._device} {state}>"
 
 
-def kill_server(device: Optional[Device] = None) -> None:
-    """Stop the daemon on `device`."""
-    with Connection(device) as connection:
-        connection.kill_server()
-
-
-def run(
-    path: str,
-    argv: Optional[Sequence[str]] = None,
-    *,
-    device: Optional[Device] = None,
-    stdin: bytes = b"",
-    **kwargs,
-) -> Tuple[ExitStatus, bytes, bytes]:
-    """Run one program on the device and collect what it said.
-
-    A connection of its own, opened and closed around the call, since a
-    connection can only ever carry one process. `kwargs` are
-    :meth:`Connection.exec`'s -- ``uid``, ``package``, ``cwd``, ``env`` and the
-    rest.
-
-    The raw form: bytes, and a status you have to look at yourself. Reach for
-    :func:`system` unless the output is binary or the exit code is the answer.
-
-    >>> status, out, err = keystork.run("/system/bin/am", ["am", "start", "-n", target])
-    """
-    connection = Connection(device)
-    try:
-        process = connection.exec(path, argv, **kwargs)
-    except BaseException:
-        connection.close()
-        raise
-    with process:
-        return process.communicate(stdin)
-
-
-def system(
-    command: str,
-    *,
-    device: Optional[Device] = None,
-    pty: Optional[bool] = None,
-    escape: Optional[int] = ESCAPE,
-    **kwargs,
-) -> int:
-    """``os.system``, pointed at the device.
-
-    Runs `command` under ``sh -c`` on this process's own terminal -- output to
-    this process's stdout and stderr, local stdin forwarded in -- captures
-    nothing, and returns the exit code::
-
-        keystork.system("ls -l /data/local/tmp")
-        keystork.system("am start -n com.foo/.Bar")
-        if keystork.system("pm path com.foo >/dev/null") != 0:
-            ...
-
-    The return value is the exit code as a shell reports it, ``128 + N`` when a
-    signal killed it -- not the encoded wait status ``os.system`` hands back.
-    :func:`run` is the one to use when the output is the point, or when it is
-    binary.
-
-    `command` goes to a shell, so pipes, redirection, globs, ``&&`` and ``$VAR``
-    all mean what they look like -- and, exactly as in a shell, so does anything
-    unquoted that came from somewhere you do not control. Build an argv with
-    :func:`run` when the command is not a literal you typed.
-
-    `pty` defaults to whether this process's stdin is a terminal, which is what
-    makes an inherited terminal behave like one: the child's ``isatty`` is true,
-    it gets colour, ``^C`` reaches it through the remote line discipline rather
-    than raising here, and a full-screen program works. It also merges stderr
-    into stdout, exactly as a shared terminal does.
-
-    A pty is also what makes `escape` matter: with one, every key including
-    ``^C`` belongs to the remote, so :data:`ESCAPE` (``^]``) is the way out of
-    something that has stopped answering. Escaping gives up on the child --
-    which the daemon then kills -- and reports 130, the code a shell uses for
-    "the user stopped this". ``escape=None`` removes the hatch.
-
-    `kwargs` are :meth:`Connection.exec`'s -- ``uid``, ``package``, ``gid``,
-    ``cwd``, ``env``.
-    """
-    if pty is None:
-        pty = stdin_is_tty()
-    rows, cols = local_window()
-
-    connection = Connection(device)
-    try:
-        process = connection.exec(
-            DEVICE_SHELL, ["sh", "-c", command], pty=pty, rows=rows, cols=cols, **kwargs
-        )
-    except BaseException:
-        connection.close()
-        raise
-    with process:
-        status = process.interact(escape=escape)
-    return 130 if status is None else status.returncode
-
-
 class KeystoreSession:
     """One UID-scoped keystore2 session: a connection that has transitioned.
 
-    Constructing one opens a connection and transitions it, so the session is
-    live -- or has raised -- by the time you have the object. Closing it closes
-    the connection, which is the same thing: the transition is one-way.
+    :meth:`Connection.open_keystore_session` is the only way in, so the
+    connection this took over is always in view -- which is the point, since
+    the transition is one-way and that connection can never do anything else.
 
-    >>> with KeystoreSession(uid=10123) as ks:
-    ...     for key in ks.list():
-    ...         print(key)
+    >>> with device.connect() as conn:
+    ...     with conn.open_keystore_session(uid=10123) as ks:
+    ...         for key in ks.list():
+    ...             print(key)
 
     Naming a package resolves it here in the client, by reading the device's
     package list over the same connection while it is still root:
 
-    >>> with KeystoreSession(package="com.google.android.gms") as ks:
-    ...     ks.uid
+    >>> with device.connect() as conn:
+    ...     with conn.open_keystore_session(package="com.google.android.gms") as ks:
+    ...         ks.uid
     10207
 
-    :meth:`Connection.open_keystore_session` is the other way in, for when the
-    connection has already done something at the top level.
+    Closing either closes both: the session *is* the connection past this
+    point.
     """
 
-    def __init__(
-        self,
-        uid: Optional[int] = None,
-        device: Optional[Device] = None,
-        *,
-        package: Optional[str] = None,
-        user: int = 0,
-    ) -> None:
-        if (uid is None) == (package is None):
-            raise ValueError("name exactly one of uid or package")
-        if user < 0:
-            raise ValueError(f"user must be non-negative, got {user}")
-
-        connection = Connection(device)
-        try:
-            if package is not None:
-                uid = connection.resolve_package(package, user)
-            self._adopt(connection, uid, connection._open_keystore(uid), package)
-        except BaseException:
-            connection.close()
-            raise
+    def __init__(self) -> None:
+        raise TypeError("open a session with Connection.open_keystore_session()")
 
     @classmethod
     def _attach(
@@ -960,6 +1038,7 @@ class KeystoreSession:
         self._package = package
         self._interface_version = opened.keystore_interface_version
         self._characteristics: Dict[str, KeyMetadata] = {}
+        self._ended = False
 
     # -- properties ---------------------------------------------------------
 
@@ -1376,12 +1455,29 @@ class KeystoreSession:
         return response
 
     def close(self) -> None:
-        """End the session, and with it the connection it took over."""
-        self._connection.close()
+        """End the session and give the connection back, still open.
+
+        The daemon releases everything it reached as this UID and climbs back
+        to root through the saved UID the drop kept, so the connection returns
+        to the top level and can open another session -- for a different UID if
+        you like, since each one is a fresh drop.
+
+        Closing an already-closed session does nothing, and a connection that
+        has gone away is not an error worth raising here: it is already in the
+        state this was asking for.
+        """
+        if self._ended or self._transport.closed:
+            return
+        self._ended = True
+        try:
+            self._exchange(pb.KeystoreRequest(end_session=pb.EndSessionRequest()))
+        except errors.ConnectionClosed:
+            return
+        self._connection._session_ended()
 
     @property
     def closed(self) -> bool:
-        return self._transport.closed
+        return self._ended or self._transport.closed
 
     def __enter__(self) -> "KeystoreSession":
         return self
@@ -1405,37 +1501,29 @@ class IntegritySession:
     process is the app's, at the app's UID and with its package and signing
     certificate, which is what Play Integrity identifies the caller by.
 
-    >>> with keystork.Connection() as conn:
-    ...     with conn.open_integrity_session("com.example.app") as integrity:
-    ...         token = integrity.classic(nonce=os.urandom(32))
+    >>> with device.connect() as conn:
+    ...     with conn.open_integrity_session(package="com.example.app") as integrity:
+    ...         nonce = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    ...         token = integrity.classic(nonce)
 
     The app lives exactly as long as this session. Closing it -- or dropping
     the connection -- ends the process, which is deliberate: nothing else on
     the device knows the process is there, so a survivor would be a process
     with no owner holding an app's identity.
 
+    :meth:`Connection.open_integrity_session` is the only way in. Unlike a
+    keystore session there is no constructor that dials for you, because the
+    two are not the same shape: a keystore session is named by a UID and
+    reached in one round trip, while this launches an app and waits seconds
+    for it, which is a thing worth seeing happen on a connection you are
+    holding.
+
     The daemon relays these messages without reading them; they are a contract
     between this class and the Java in the app.
     """
 
-    def __init__(
-        self,
-        package: str,
-        device: Optional[Device] = None,
-        *,
-        uid: Optional[int] = None,
-        user: int = 0,
-        timeout_ms: Optional[int] = None,
-    ) -> None:
-        connection = Connection(device)
-        try:
-            opened = connection.open_integrity_session(
-                package, uid=uid, user=user, timeout_ms=timeout_ms
-            )
-        except BaseException:
-            connection.close()
-            raise
-        self._adopt(connection, package, opened._opened)
+    def __init__(self) -> None:
+        raise TypeError("open a session with Connection.open_integrity_session()")
 
     @classmethod
     def _attach(
@@ -1480,16 +1568,26 @@ class IntegritySession:
 
     def classic(
         self,
-        nonce: Union[bytes, str],
+        nonce: str,
         *,
         cloud_project_number: Optional[int] = None,
     ) -> str:
         """Request a classic integrity token. Returns it as the API gave it.
 
-        `nonce` may be raw bytes, which are encoded here as the API requires --
-        URL-safe base64, unpadded and unwrapped, 16..500 bytes once decoded --
-        or a string, which is passed through untouched for a caller who has
-        already done that.
+        `nonce` reaches the API exactly as given, and is yours to build: it
+        must be URL-safe base64, unwrapped, decoding to 16..500 bytes. Nothing
+        here encodes, pads or trims it, because it is the value the token is
+        bound to and the one you will check the verdict against -- a client
+        that rewrote it would be handing you back something you never sent.
+
+        (Play echoes the nonce in ``requestDetails.nonce`` re-encoded from the
+        bytes it decoded, so compare decoded bytes rather than strings if you
+        did not pad it the same way.)
+
+        A nonce the API will not take comes back as an
+        :class:`~keystork.errors.IntegrityError` naming its own code --
+        ``NONCE_TOO_SHORT``, ``NONCE_IS_NOT_BASE64`` -- rather than being
+        second-guessed here.
 
         `cloud_project_number` is only needed for an app Google Play does not
         know; the ordinary case is the app's own linked project, which the API
@@ -1498,7 +1596,7 @@ class IntegritySession:
         The token is a JWE. Its verdicts are readable only by Play, or by
         whoever holds the app's decryption keys -- nothing here looks inside.
         """
-        request = pb.ClassicTokenRequest(nonce=_integrity_nonce(nonce))
+        request = pb.ClassicTokenRequest(nonce=nonce)
         if cloud_project_number is not None:
             request.cloud_project_number = cloud_project_number
         return self._exchange(pb.IntegrityRequest(classic=request)).token.token
@@ -1561,10 +1659,3 @@ class IntegritySession:
         return f"<IntegritySession {self._package} ({state})>"
 
 
-def _integrity_nonce(nonce: Union[bytes, str]) -> str:
-    """The API's nonce format: URL-safe base64, no padding, no wrapping."""
-    if isinstance(nonce, str):
-        return nonce
-    if not 16 <= len(nonce) <= 500:
-        raise ValueError(f"a nonce must be 16..500 bytes, got {len(nonce)}")
-    return base64.urlsafe_b64encode(nonce).decode("ascii").rstrip("=")

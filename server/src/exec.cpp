@@ -128,6 +128,11 @@ bool SetNonBlocking(int fd) {
   return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+bool SetBlocking(int fd) {
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  return flags >= 0 && ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0;
+}
+
 // The daemon's own environment with the request's entries applied on top,
 // replacing rather than duplicating a key that is already there -- execve
 // takes the list literally and most programs read only the first match.
@@ -475,7 +480,8 @@ bool StartExec(const pb::ExecRequest& request, ExecProcess* process, pb::Error* 
   return true;
 }
 
-int RunExecSession(int fd, ExecProcess* process) {
+ExecOutcome RunExecSession(int fd, ExecProcess* process, std::string* leftover) {
+  leftover->clear();
   if (!SetNonBlocking(fd)) {
     KS_LOGE("could not make the connection non-blocking: %s", ::strerror(errno));
   }
@@ -489,9 +495,14 @@ int RunExecSession(int fd, ExecProcess* process) {
   bool client_gone = false;
   bool reaped = false;
 
+  // Wrapped in a CommandResponse like everything else this connection sends,
+  // so the client parses one message type for the whole of its life.
   const auto enqueue = [&to_client](const pb::ExecEvent& event) {
+    pb::CommandResponse response;
+    *response.mutable_exec_event() = event;
+
     std::string encoded;
-    if (!event.SerializeToString(&encoded)) {
+    if (!response.SerializeToString(&encoded)) {
       KS_LOGE("failed to serialize an exec event");
       return;
     }
@@ -644,12 +655,21 @@ int RunExecSession(int fd, ExecProcess* process) {
 
     std::string frame;
     while (incoming.Next(&frame)) {
-      pb::ExecInput input;
-      if (!input.ParseFromString(frame)) {
-        KS_LOGE("malformed exec input");
+      pb::Command command;
+      if (!command.ParseFromString(frame)) {
+        KS_LOGE("malformed command during an exec session");
         client_gone = true;
         break;
       }
+      if (command.body_case() != pb::Command::kExecInput) {
+        // The client is not supposed to send anything else while a child is
+        // running, and cannot usefully be answered here -- this loop has no
+        // way to reply to a command.
+        KS_LOGE("a command arrived mid-exec; ending the connection");
+        client_gone = true;
+        break;
+      }
+      const pb::ExecInput& input = command.exec_input();
       switch (input.body_case()) {
         case pb::ExecInput::kStdinData:
           if (process->in >= 0 && !stdin_eof) {
@@ -702,8 +722,25 @@ int RunExecSession(int fd, ExecProcess* process) {
     while (::waitpid(process->pid, nullptr, 0) < 0 && errno == EINTR) {
     }
     KS_LOGI("exec pid=%d killed: the client disconnected", process->pid);
+    return ExecOutcome::kClientGone;
   }
-  return 0;
+  if (client_gone) return ExecOutcome::kClientGone;
+
+  // The child ended and the client is still there, so the connection goes back
+  // to the top level: blocking again for the command loop, carrying whatever
+  // was read past the last frame this loop consumed.
+  //
+  // Those leftover bytes need no interpretation here, which is the point of
+  // exec_input living inside Command: an input the client sent just before the
+  // exit and a command it sent just after are the same kind of message, so
+  // handing them on is enough. The top level recognizes a straggler for what
+  // it is.
+  if (!SetBlocking(fd)) {
+    KS_LOGE("could not restore the connection to blocking: %s", ::strerror(errno));
+    return ExecOutcome::kFailed;
+  }
+  *leftover = incoming.Rest();
+  return ExecOutcome::kChildExited;
 }
 
 }  // namespace keystork

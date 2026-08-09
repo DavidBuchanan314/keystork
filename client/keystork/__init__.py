@@ -1,9 +1,15 @@
 """keystork -- drive a remote Android device's keystore2 over IP.
 
     >>> import keystork
-    >>> with keystork.KeystoreSession(uid=10123) as ks:
-    ...     for key in ks.list():
-    ...         print(key)
+    >>> device = keystork.Device()
+    >>> with device.connect() as conn:
+    ...     with conn.open_keystore_session(uid=10123) as ks:
+    ...         for key in ks.list():
+    ...             print(key)
+
+A device is an address, a connection is a conversation with the daemon, and a
+session is a connection that has been handed over. Each is reached by a verb on
+the one before it, and :class:`Device` is the only one you construct.
 
 The daemon on the device is deliberately dumb: it makes one keystore2 Binder
 call as the session's UID and hands the raw bytes back. Everything that is
@@ -34,6 +40,7 @@ from .enums import (
 )
 from .errors import (
     ConnectionClosed,
+    CommandFailed,
     IdentityError,
     IntegrityError,
     KeyMintError,
@@ -63,6 +70,8 @@ from .session import (
     Authorization,
     Connection,
     Device,
+    IntegritySession,
+    KeystoreSession,
     KeyDescriptor,
     KeyMetadata,
     KeyParameter,
@@ -70,17 +79,12 @@ from .session import (
     OperationBegun,
     OperationResult,
     NONCE_LENGTHS,
-    IntegritySession,
-    KeystoreSession,
     PACKAGES_LIST,
     READ_CHUNK_BYTES,
     USER_OFFSET,
-    kill_server,
     parse_packages_list,
     nonce_length,
     operation_parameters,
-    run,
-    system,
 )
 
 __version__ = "0.1.0"
@@ -92,6 +96,7 @@ __all__ = [
     "BinderStatus",
     "BlockMode",
     "CHUNK_BYTES",
+    "CommandFailed",
     "Connection",
     "ConnectionClosed",
     "DEFAULT_HOST",
@@ -109,6 +114,7 @@ __all__ = [
     "HardwareAuthenticatorType",
     "IdentityError",
     "IntegrityError",
+    "IntegritySession",
     "KeyDescriptor",
     "KeyMetadata",
     "KeyMintError",
@@ -116,7 +122,6 @@ __all__ = [
     "KeyParameter",
     "KeyPurpose",
     "KeystoreError",
-    "IntegritySession",
     "KeystoreSession",
     "KeystorkError",
     "MIN_INTERFACE_VERSION",
@@ -142,12 +147,9 @@ __all__ = [
     "TransactionError",
     "USER_OFFSET",
     "UnsupportedByDevice",
-    "kill_server",
     "name_of",
     "nonce_length",
     "operation_parameters",
     "parse_packages_list",
-    "run",
-    "system",
     "type_of_tag",
 ]

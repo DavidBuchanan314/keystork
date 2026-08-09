@@ -5,7 +5,7 @@ neither side answers the other: the daemon sends output whenever the child
 produces it, this end sends stdin whenever it has some, and the last thing on
 the wire is the exit status.
 
-    >>> with keystork.Connection() as conn:
+    >>> with keystork.Device().connect() as conn:
     ...     proc = conn.exec("/system/bin/id")
     ...     status, out, err = proc.communicate()
 
@@ -103,7 +103,7 @@ class Process:
     bytes in both directions.
     """
 
-    def __init__(self, sock: socket.socket, started: pb.ExecStarted) -> None:
+    def __init__(self, sock: socket.socket, started: pb.ExecStarted, connection=None) -> None:
         self._sock = sock
         self._sock.setblocking(False)
         self._reader = FrameReader()
@@ -112,6 +112,10 @@ class Process:
         self._pty = started.pty
         self._status: Optional[ExitStatus] = None
         self._hung_up = False
+        # Borrowed, not taken: on a clean exit the socket goes back and the
+        # connection carries on at the top level. `None` for a process that
+        # owns its connection outright, which is what run() and system() make.
+        self._connection = connection
 
     @property
     def pid(self) -> int:
@@ -235,7 +239,21 @@ class Process:
             return self._interact(stdin_fd, terminal, escape if raw else None)
 
     def close(self) -> None:
-        """Drop the connection. A still-running child is killed by the daemon."""
+        """Done with the process.
+
+        A child that has already exited leaves the connection alone -- it went
+        back to the top level the moment its exit arrived, and closing here
+        would throw away a connection that is still good.
+
+        A child that is *still running* has only one way to be stopped from
+        here, and that is dropping the connection: the daemon kills what it can
+        no longer talk to. So that is what this does, and the connection goes
+        with it.
+        """
+        if self.finished and self._connection is not None:
+            return
+        if self._connection is not None:
+            self._connection._closed_by_process()
         try:
             self._sock.close()
         except OSError:
@@ -254,7 +272,12 @@ class Process:
     # -- the pump -------------------------------------------------------
 
     def _queue(self, message: pb.ExecInput) -> None:
-        self._outbound += encode_frame(message.SerializeToString())
+        # Wrapped in a Command, which is the only thing this connection ever
+        # sends. See the note above Command in the .proto: an unpaired
+        # subprotocol cannot have a message type of its own without making the
+        # end of it undecidable.
+        command = pb.Command(exec_input=message)
+        self._outbound += encode_frame(command.SerializeToString())
 
     def _flush(self) -> None:
         while self._outbound:
@@ -282,12 +305,19 @@ class Process:
         """Every buffered frame, as output chunks. Records the exit if it lands."""
         chunks: List[Tuple[int, bytes]] = []
         for frame in self._reader:
-            event = pb.ExecEvent()
+            response = pb.CommandResponse()
             try:
-                event.ParseFromString(frame)
+                response.ParseFromString(frame)
             except Exception as exc:
                 raise errors.ProtocolError(f"could not parse an exec event: {exc}") from exc
+            if response.WhichOneof("body") == "error":
+                raise errors.from_wire(response.error)
+            if response.WhichOneof("body") != "exec_event":
+                raise errors.ProtocolError(
+                    f"expected an exec event, got {response.WhichOneof('body')!r}"
+                )
 
+            event = response.exec_event
             body = event.WhichOneof("body")
             if body == "output":
                 chunks.append((event.output.stream, event.output.data))
@@ -297,6 +327,13 @@ class Process:
                     exit_code=event.exit.exit_code if which == "exit_code" else None,
                     term_signal=event.exit.term_signal if which == "term_signal" else None,
                 )
+                # The daemon sends this last, after reaping the child and
+                # draining its output, so the connection can be a connection
+                # again. Anything we sent that is still in flight is a Command
+                # like any other and the daemon recognizes it for what it is.
+                if self._connection is not None:
+                    self._sock.setblocking(True)
+                    self._connection._process_ended()
             elif body == "error":
                 raise errors.from_wire(event.error)
             else:

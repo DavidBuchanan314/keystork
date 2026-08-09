@@ -41,6 +41,32 @@ class IdentityError(KeystorkError):
         self.errno = errno
 
 
+class CommandFailed(KeystorkError):
+    """A program run with ``check_output`` ended badly.
+
+    The remote counterpart of :class:`subprocess.CalledProcessError`: it means
+    the program ran and then failed, which is different from the daemon being
+    unable to run it at all -- that is an :class:`IdentityError`, raised before
+    anything started.
+
+    Carries everything the caller would otherwise have had to ask for: the
+    :class:`~keystork.ExitStatus`, and both streams as bytes.
+    """
+
+    def __init__(self, path: str, status, stdout: bytes, stderr: bytes) -> None:
+        detail = stderr.decode("utf-8", "replace").strip()
+        super().__init__(f"{path} {status}" + (f": {detail}" if detail else ""))
+        self.path = path
+        self.status = status
+        self.stdout = stdout
+        self.stderr = stderr
+
+    @property
+    def returncode(self) -> int:
+        """As a shell would report it: ``128 + N`` when a signal ended it."""
+        return self.status.returncode
+
+
 class IntegrityError(KeystorkError):
     """The Play Integrity API refused, inside the app.
 

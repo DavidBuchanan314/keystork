@@ -65,11 +65,27 @@ constexpr uint32_t kProtocolVersion = pb::PROTOCOL_VERSION_1;
 // on, with room for the rest of the message.
 constexpr size_t kReadChunkBytes = 1024 * 1024;
 
-// Permanently drops to `uid`, used as both UID and primary GID -- real,
-// effective and saved all at once, so there is no way back to root. Must run
-// before any Binder call: the kernel captures the caller's credentials per
-// transaction, and keystore2 partitions keys by exactly those credentials.
-bool DropPrivileges(uid_t uid, std::string* error, int* error_errno) {
+// What root looked like before a session dropped, so it can be put back.
+struct SavedIdentity {
+  std::vector<gid_t> groups;
+  bool held = false;
+};
+
+// Drops to `uid`, used as both UID and primary GID, keeping **0 as the saved
+// ID** so the session can be ended and the connection returned to the top
+// level. Must run before any Binder call: the kernel captures the caller's
+// credentials per transaction, and keystore2 partitions keys by exactly those.
+//
+// A saved 0 does mean a bug inside a session could climb back to root rather
+// than being confined to an app's UID. That is not a threat here: this daemon
+// is unauthenticated and hands out `exec` as root to anyone who connects, so
+// the escalation it would buy is one the protocol offers outright.
+//
+// What is still structural is the part that matters -- keys are UID
+// partitioned, and the only way to act as a UID is to *be* it at transaction
+// time. A session is one UID for its whole life; ending it is the only way
+// back, and the next one starts from root again.
+bool DropPrivileges(uid_t uid, SavedIdentity* saved, std::string* error, int* error_errno) {
   const auto gid = static_cast<gid_t>(uid);
 
   auto fail = [&](const char* what) {
@@ -78,11 +94,19 @@ bool DropPrivileges(uid_t uid, std::string* error, int* error_errno) {
     return false;
   };
 
+  // Recorded before the drop, since setgroups is what throws them away and
+  // there is no reading them back afterwards.
+  const int count = ::getgroups(0, nullptr);
+  if (count < 0) return fail("getgroups");
+  saved->groups.assign(static_cast<size_t>(count), 0);
+  if (count > 0 && ::getgroups(count, saved->groups.data()) < 0) return fail("getgroups");
+  saved->held = true;
+
   // Supplementary groups are inherited from root and would otherwise survive
   // the drop, leaving the session with more access than the UID it claims.
   if (::setgroups(1, &gid) != 0) return fail("setgroups");
-  if (::setresgid(gid, gid, gid) != 0) return fail("setresgid");
-  if (::setresuid(uid, uid, uid) != 0) return fail("setresuid");
+  if (::setresgid(gid, gid, 0) != 0) return fail("setresgid");
+  if (::setresuid(uid, uid, 0) != 0) return fail("setresuid");
 
   // setresuid reports success if it changed *some* of the three IDs, so the
   // drop is verified rather than assumed.
@@ -90,9 +114,33 @@ bool DropPrivileges(uid_t uid, std::string* error, int* error_errno) {
   gid_t rgid, egid, sgid;
   if (::getresuid(&ruid, &euid, &suid) != 0) return fail("getresuid");
   if (::getresgid(&rgid, &egid, &sgid) != 0) return fail("getresgid");
-  if (ruid != uid || euid != uid || suid != uid || rgid != gid || egid != gid || sgid != gid) {
+  if (ruid != uid || euid != uid || suid != 0 || rgid != gid || egid != gid || sgid != 0) {
     *error_errno = 0;
     *error = "privilege drop did not take effect";
+    return false;
+  }
+  return true;
+}
+
+// Climbs back through the saved 0, in the reverse order of the drop: the UID
+// first, because everything below it needs root, and the groups last, because
+// only root may set them.
+bool RaisePrivileges(const SavedIdentity& saved, std::string* error) {
+  auto fail = [&](const char* what) {
+    *error = std::string(what) + " failed: " + ::strerror(errno);
+    return false;
+  };
+
+  if (::setresuid(0, 0, 0) != 0) return fail("setresuid(0)");
+  if (::setresgid(0, 0, 0) != 0) return fail("setresgid(0)");
+  if (saved.held && ::setgroups(saved.groups.size(), saved.groups.data()) != 0) {
+    return fail("setgroups");
+  }
+
+  uid_t ruid, euid, suid;
+  if (::getresuid(&ruid, &euid, &suid) != 0) return fail("getresuid");
+  if (ruid != 0 || euid != 0 || suid != 0) {
+    *error = "could not get back to root";
     return false;
   }
   return true;
@@ -366,6 +414,19 @@ struct SessionState {
   std::shared_ptr<IKeystoreService> service;
   std::shared_ptr<IKeystoreOperation> operation;
   std::map<int32_t, std::shared_ptr<IKeystoreSecurityLevel>> security_levels;
+
+  // Root as it was before the drop, for end_session to climb back to.
+  SavedIdentity saved;
+
+  // Everything the dropped UID reached goes when the session does. Binder
+  // itself does not: the driver captures credentials per transaction, so the
+  // process's one connection serves whatever UID it currently is, and the next
+  // session's proxies are fetched fresh anyway.
+  void Forget() {
+    operation.reset();
+    security_levels.clear();
+    service.reset();
+  }
 };
 
 std::vector<uint8_t> Bytes(const std::string& in) {
@@ -597,12 +658,13 @@ bool SendFrame(int fd, const google::protobuf::MessageLite& message) {
 // Drops privileges and connects to keystore2. Failures are reported in the
 // command response like any other, so the client always learns why.
 std::shared_ptr<IKeystoreService> OpenKeystoreSession(const pb::OpenKeystoreSessionRequest& request,
+                                                      SavedIdentity* saved,
                                                       pb::CommandResponse* response) {
   const auto uid = static_cast<uid_t>(request.uid());
 
   std::string error;
   int error_errno = 0;
-  if (!DropPrivileges(uid, &error, &error_errno)) {
+  if (!DropPrivileges(uid, saved, &error, &error_errno)) {
     KS_LOGE("could not become uid=%u: %s", uid, error.c_str());
     FillIdentityError(error, error_errno, response->mutable_error());
     return nullptr;
@@ -673,6 +735,38 @@ void HandleKillServer(pid_t supervisor_pid, pb::CommandResponse* response) {
   KS_LOGI("kill_server requested, signalling supervisor %d", supervisor_pid);
 }
 
+// One frame, taking anything an exec pump read past its own last frame first.
+// Those bytes are already off the socket, so reading the socket again would
+// skip them; and a frame that arrived in pieces has to be reassembled from the
+// half that is here and the half still in flight.
+FrameStatus NextFrame(int fd, std::string* pending, std::string* out) {
+  if (pending->empty()) return ReadFrame(fd, out);
+
+  FrameBuffer buffered;
+  buffered.Append(pending->data(), pending->size());
+  for (;;) {
+    if (buffered.over_limit()) return FrameStatus::kTooLarge;
+    if (buffered.Next(out)) {
+      *pending = buffered.Rest();
+      return FrameStatus::kOk;
+    }
+
+    char chunk[4096];
+    const ssize_t got = ::read(fd, chunk, sizeof(chunk));
+    if (got > 0) {
+      buffered.Append(chunk, static_cast<size_t>(got));
+      continue;
+    }
+    if (got == 0) {
+      // Mid-frame, so this is a truncation rather than a clean hang-up.
+      pending->clear();
+      return FrameStatus::kTruncated;
+    }
+    if (errno == EINTR) continue;
+    return FrameStatus::kIoError;
+  }
+}
+
 }  // namespace
 
 int RunConnection(int fd, pid_t supervisor_pid) {
@@ -687,10 +781,18 @@ int RunConnection(int fd, pid_t supervisor_pid) {
   IntegritySession integrity;
   std::string encoded;
 
+  // Bytes an exec pump read past the last frame it consumed. Already off the
+  // socket, so the command loop has to take them from here.
+  std::string pending;
+
+  // Two levels, and the connection moves between them: the top level hands
+  // over to a subprotocol, and a keystore session hands back. exec and
+  // integrity do not come back, so those return out of here entirely.
+  for (;;) {
   // Top level: root, one Command at a time, until one hands the connection to
   // a subprotocol.
   while (session.service == nullptr) {
-    const FrameStatus frame_status = ReadFrame(fd, &encoded);
+    const FrameStatus frame_status = NextFrame(fd, &pending, &encoded);
     if (frame_status == FrameStatus::kEof) return 0;
     if (frame_status != FrameStatus::kOk) {
       KS_LOGE("command read failed: %s", ToString(frame_status));
@@ -702,6 +804,7 @@ int RunConnection(int fd, pid_t supervisor_pid) {
     bool kill_requested = false;
     bool exec_started = false;
     bool integrity_opened = false;
+    bool straggler = false;
 
     if (!command.ParseFromString(encoded)) {
       FillProtocolError("malformed command", response.mutable_error());
@@ -715,9 +818,11 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           kill_requested = true;
           break;
         case pb::Command::kOpenKeystoreSession:
-          // Irreversible: from here the connection is a keystore session and
-          // nothing else, because the UID drop cannot be undone.
-          session.service = OpenKeystoreSession(command.open_keystore_session(), &response);
+          // From here the connection is a keystore session until it says
+          // otherwise: the drop keeps 0 as the saved UID, so end_session can
+          // climb back and the top level resumes.
+          session.service =
+              OpenKeystoreSession(command.open_keystore_session(), &session.saved, &response);
           break;
         case pb::Command::kExec: {
           // Also irreversible, for a different reason: on success the
@@ -744,6 +849,13 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           integrity_opened = OpenIntegritySession(command.open_integrity_session(), &response,
                                                   &integrity);
           break;
+        case pb::Command::kExecInput:
+          // Input for a child that has already exited: the client sent it
+          // before it saw the exit, and it arrived after. Harmless, and
+          // recognizable as itself -- which is the whole reason exec_input
+          // lives in Command rather than in a message of its own.
+          straggler = true;
+          break;
         case pb::Command::BODY_NOT_SET:
           // Also what a newer client's unimplemented command looks like here:
           // its field number is unknown to this build, so no arm is set.
@@ -752,6 +864,11 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           break;
       }
     }
+
+    // A straggling exec input is answered with nothing at all: the client is
+    // not waiting on it, and a response it never asked for would be read as
+    // the answer to whatever it asks next.
+    if (straggler) continue;
 
     if (!SendFrame(fd, response)) {
       KS_LOGE("command response write failed: %s", ::strerror(errno));
@@ -767,16 +884,30 @@ int RunConnection(int fd, pid_t supervisor_pid) {
     }
 
     // The client has been told the child's pid; everything after this is its
-    // stdio, in both directions and unprompted.
-    if (exec_started) return RunExecSession(fd, &process);
+    // stdio, in both directions and unprompted -- until the child exits, at
+    // which point the connection is a connection again.
+    if (exec_started) {
+      std::string leftover;
+      switch (RunExecSession(fd, &process, &leftover)) {
+        case ExecOutcome::kChildExited:
+          pending.append(leftover);
+          process = ExecProcess();
+          continue;
+        case ExecOutcome::kClientGone:
+          return 0;
+        case ExecOutcome::kFailed:
+          return 1;
+      }
+    }
 
     // Likewise: the client has been told the app is up, and everything after
     // this belongs to it.
     if (integrity_opened) return RunIntegritySession(fd, &integrity);
   }
 
-  // Keystore subprotocol: only these messages, for the rest of the connection.
-  for (;;) {
+  // Keystore subprotocol: only these messages, until end_session or EOF.
+  bool ended = false;
+  while (!ended) {
     const FrameStatus frame_status = ReadFrame(fd, &encoded);
     if (frame_status == FrameStatus::kEof) return 0;
     if (frame_status != FrameStatus::kOk) {
@@ -790,6 +921,25 @@ int RunConnection(int fd, pid_t supervisor_pid) {
       FillProtocolError("malformed request", response.mutable_error());
     } else {
       switch (request.body_case()) {
+        case pb::KeystoreRequest::kEndSession: {
+          // Everything the dropped UID reached is released before the climb,
+          // so nothing outlives the identity it was obtained under.
+          session.Forget();
+          std::string error;
+          if (!RaisePrivileges(session.saved, &error)) {
+            // Nothing here can be trusted afterwards: the connection is stuck
+            // at a UID it was meant to have left, and pretending otherwise
+            // would let the next command run as the wrong one.
+            KS_LOGE("could not end the keystore session: %s", error.c_str());
+            FillIdentityError(error, errno, response.mutable_error());
+            SendFrame(fd, response);
+            return 1;
+          }
+          KS_LOGI("keystore session ended; back to root");
+          response.mutable_end_session();
+          ended = true;
+          break;
+        }
         case pb::KeystoreRequest::kList:
           HandleList(session.service.get(), request.list(), &response);
           break;
@@ -827,6 +977,7 @@ int RunConnection(int fd, pid_t supervisor_pid) {
       return 1;
     }
   }
+  }  // and round to the top level again, as root
 }
 
 }  // namespace keystork

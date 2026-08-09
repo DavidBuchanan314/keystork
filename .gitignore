@@ -79,6 +79,7 @@ design_docs/
 __pycache__/
 *.py[codz]
 *$py.class
+*.egg-info/
 
 # Gradle build of the agent's APK
 server/agent/apk/build/

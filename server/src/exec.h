@@ -30,13 +30,26 @@ struct ExecProcess {
 // leave the connection at the top level.
 bool StartExec(const v1::ExecRequest& request, ExecProcess* process, v1::Error* error);
 
+// How an exec session ended, and whether the connection survives it.
+enum class ExecOutcome {
+  kChildExited,  // reaped, output drained, ExecExit sent -- the connection is usable
+  kClientGone,   // the peer hung up, so the child was killed; nothing left to talk to
+  kFailed,       // the machinery broke
+};
+
 // Pumps `process`'s stdio over `fd` until the child exits or the peer hangs
-// up, then reaps it and closes its fds. Returns the status the connection's
-// child should exit with.
+// up, then reaps it and closes its fds.
 //
-// `fd` is switched to non-blocking and stays that way: this is the one place
-// in the protocol where both sides talk unprompted, so neither the socket nor
-// the child may be allowed to stall the other.
-int RunExecSession(int fd, ExecProcess* process);
+// `fd` is non-blocking for the duration -- this is the one place in the
+// protocol where both sides talk unprompted, so neither the socket nor the
+// child may be allowed to stall the other -- and blocking again on the way
+// out, because the top level reads with blocking calls.
+//
+// On kChildExited the connection goes back to the top level, and anything read
+// past the last frame this consumed comes back in `leftover` -- bytes already
+// off the socket, which the command loop has to see. They need no
+// interpretation here: exec_input is an arm of Command, so an input sent just
+// before the exit and a command sent just after are the same kind of message.
+ExecOutcome RunExecSession(int fd, ExecProcess* process, std::string* leftover);
 
 }  // namespace keystork

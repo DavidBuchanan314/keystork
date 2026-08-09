@@ -10,19 +10,34 @@
 //   client -> Command      \  repeated, strictly synchronous,
 //   server -> CommandResponse /  one in flight at a time
 //
-// Three commands hand the connection over to a subprotocol and never give it
-// back. open_keystore_session drops to the session's UID -- the connection
-// becomes a keystore session, strictly synchronous like the top level:
+// Three commands hand the connection over to a subprotocol.
+// open_keystore_session drops to the session's UID -- the connection becomes a
+// keystore session, strictly synchronous like the top level:
 //
 //   client -> KeystoreRequest   \
 //   server -> KeystoreResponse  /
 //
-// exec starts a process -- the connection becomes its stdio, and is the one
+// That one gives the connection back: end_session climbs to root through the
+// saved UID the drop kept, and the top level resumes. The other two do not.
+//
+// exec starts a process -- the connection carries its stdio, and is the one
 // place in this protocol where messages are *not* paired. Either side sends
 // whenever it has something to say, until the process exits:
 //
-//   client -> ExecInput   (stdin, resize, signal; any time, any number)
-//   server -> ExecEvent   (output, exit; any time, any number)
+//   client -> Command{exec_input}    (stdin, resize, signal; any time, any number)
+//   server -> CommandResponse{exec_event}  (output, exit; any time, any number)
+//
+// Those ride inside the top-level messages rather than in a pair of their own,
+// and that is load-bearing rather than tidy. Being unpaired means a client's
+// input can still be in flight when the child exits, so the daemon would have
+// to decide, byte by byte, whether what arrives next belongs to the finished
+// session or is the next command -- which is not decidable from the bytes.
+// With one message type per direction there is nothing to decide: a late
+// exec_input is recognizably itself and gets dropped.
+//
+// The other subprotocols do not need this, because they are strictly paired:
+// the client sends nothing until it has the previous answer, so the boundary
+// falls between messages by construction.
 //
 // open_integrity_session launches an app, takes its own code off every
 // classpath in the process and puts ours there instead -- the connection
@@ -36,12 +51,11 @@
 // the messages below are a contract between the Python client and the Java in
 // the app, and the daemon needs no change to serve a new one.
 //
-// There is no way back from any of them, and no second session on the same
-// connection: the UID drop cannot be undone, a connection carrying a process's
-// stdio has nothing left to say a command in, and the app lives exactly as
-// long as the connection that launched it. Reading files is a top-level
-// command precisely because it always runs as root, which is only true before
-// that point.
+// exec and open_integrity_session have no way back: a connection carrying a
+// process's stdio has nothing left to say a command in, and the app lives
+// exactly as long as the connection that launched it. Reading files is a
+// top-level command precisely because it always runs as root -- which, after a
+// keystore session has ended, is true again.
 //
 // Modeling rules (see design_docs/keystore-over-ip-design.md §4):
 //   - The wire speaks KeyMint's raw integers. Enums from keystore2/KeyMint are
@@ -141,6 +155,11 @@ message Command {
     OpenKeystoreSessionRequest open_keystore_session = 3;
     ExecRequest exec = 4;
     OpenIntegritySessionRequest open_integrity_session = 5;
+
+    // A running child's stdin, resize or signal. Here, rather than in a
+    // message of its own, because exec is the one subprotocol that is not
+    // paired -- see the note above Command.
+    ExecInput exec_input = 6;
   }
 }
 
@@ -152,6 +171,10 @@ message CommandResponse {
     KeystoreSessionOpened open_keystore_session = 4;
     ExecStarted exec = 5;
     IntegritySessionOpened open_integrity_session = 6;
+
+    // A running child's output, or its exit. Unprompted, and any number of
+    // them: the only response here that is not an answer to a command.
+    ExecEvent exec_event = 7;
   }
 }
 
@@ -410,6 +433,7 @@ message ExecInput {
     // with its sleep. A pty client normally has no use for this: ^C is a byte
     // like any other and the line discipline raises the signal itself.
     uint32 signal = 4;
+
   }
 }
 
@@ -692,8 +716,20 @@ message KeystoreRequest {
     OpUpdateRequest op_update = 5;
     OpFinishRequest op_finish = 6;
     OpAbortRequest op_abort = 7;
+    EndSessionRequest end_session = 9;
   }
 }
+
+// Ends the keystore session and returns the connection to the top level. The
+// daemon climbs back to root through the saved UID it kept for exactly this,
+// so the next thing on this connection starts from root again -- including
+// another keystore session, for a different UID if you like.
+//
+// A session is still one UID for its whole life. This ends one; it does not
+// change one.
+message EndSessionRequest {}
+
+message EndSessionResponse {}
 
 message KeystoreResponse {
   oneof body {
@@ -706,5 +742,6 @@ message KeystoreResponse {
     OpUpdateResponse op_update = 6;
     OpFinishResponse op_finish = 7;
     OpAbortResponse op_abort = 8;
+    EndSessionResponse end_session = 10;
   }
 }

@@ -141,12 +141,21 @@ class Transport:
             if self._sock is not None:
                 self._sock.settimeout(previous)
 
-    def detach(self) -> socket.socket:
-        """Hand the socket to someone else, still open.
+    def borrow(self) -> socket.socket:
+        """Lend the socket out, keeping it.
 
-        Used when a connection stops being a sequence of framed round-trips --
-        an exec session, whose two directions run independently. This transport
-        is spent afterwards and closing it is a no-op.
+        For an exec session, whose two directions run independently while the
+        child lives. The borrower is expected to hand it back in the state it
+        found it -- blocking, at a frame boundary -- which for exec is exactly
+        what the child's exit event guarantees.
+        """
+        return self._require_open()
+
+    def detach(self) -> socket.socket:
+        """Give the socket up for good.
+
+        This transport is spent afterwards and closing it is a no-op; whoever
+        took it owns closing it now.
         """
         sock = self._require_open()
         self._sock = None
