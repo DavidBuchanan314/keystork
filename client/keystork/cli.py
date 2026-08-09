@@ -22,6 +22,7 @@ from .session import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
+    Connection,
     Device,
     KeyDescriptor,
     KeyMetadata,
@@ -178,6 +179,23 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_key_arg(decrypting)
     _add_input_args(decrypting)
     _add_parameter_args(decrypting, symmetric=True)
+
+    reading = commands.add_parser(
+        "read-file",
+        help="read a file from the device as root",
+        description="Runs as root, which is why it is a top-level command: "
+        "privileges are gone once a keystore session opens.",
+    )
+    reading.add_argument("path", help="absolute path on the device")
+    reading.add_argument("--offset", type=int, default=0, help="start at this byte")
+    reading.add_argument("--length", type=int, default=None, help="stop after this many bytes")
+    reading.add_argument("-o", "--out", metavar="FILE", help="write to FILE, not stdout")
+    reading.add_argument("--hex", action="store_true", help="hex-encode the output")
+
+    commands.add_parser(
+        "packages",
+        help="list the device's packages and the UIDs they run as",
+    )
 
     commands.add_parser(
         "kill-server",
@@ -359,6 +377,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             kill_server(device)
             if args.verbose:
                 print(f"stopped keystorkd on {device}", file=sys.stderr)
+            return 0
+
+        if args.command == "read-file":
+            with Connection(device) as connection:
+                data = connection.read_file(args.path, offset=args.offset, length=args.length)
+            _write_output(data, args.out, args.hex)
+            return 0
+
+        if args.command == "packages":
+            with Connection(device) as connection:
+                packages = connection.packages()
+            for name in sorted(packages):
+                print(f"{packages[name]}\t{name}")
             return 0
 
         with KeystoreSession(

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
 #include <grp.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -56,54 +57,11 @@ using ::aidl::android::system::keystore2::KeyEntryResponse;
 
 constexpr char kKeystoreServiceName[] = "android.system.keystore2.IKeystoreService/default";
 
-// The package manager's own record of which UID each package runs as. 0640
-// system:package_info, so it must be read before the privilege drop -- an app
-// UID cannot open it.
-constexpr char kPackagesList[] = "/data/system/packages.list";
-
-// Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
-constexpr long kUserOffset = 100000;
 constexpr uint32_t kProtocolVersion = pb::PROTOCOL_VERSION_1;
 
-// Resolves a package name to the UID it runs as. Every line of packages.list is
-// space-separated with the name first and its user-0 UID second; nothing after
-// that matters here. Parsed with stdio rather than iostreams to keep the
-// binary's static libc++ from growing a locale machinery it uses nowhere else.
-bool ResolvePackage(const std::string& name, uint32_t user, uid_t* uid, std::string* error,
-                    int* error_errno) {
-  FILE* file = ::fopen(kPackagesList, "re");
-  if (file == nullptr) {
-    *error_errno = errno;
-    *error = std::string("could not read ") + kPackagesList + ": " + ::strerror(errno);
-    return false;
-  }
-
-  char* line = nullptr;
-  size_t capacity = 0;
-  bool found = false;
-  while (::getline(&line, &capacity, file) > 0) {
-    const char* separator = ::strchr(line, ' ');
-    if (separator == nullptr) continue;
-    if (static_cast<size_t>(separator - line) != name.size()) continue;
-    if (::memcmp(line, name.data(), name.size()) != 0) continue;
-
-    const long app_uid = ::strtol(separator + 1, nullptr, 10);
-    if (app_uid <= 0) continue;
-    // packages.list records the user-0 UID; strip any user already in it before
-    // applying the requested one.
-    *uid = static_cast<uid_t>(app_uid % kUserOffset + static_cast<long>(user) * kUserOffset);
-    found = true;
-    break;
-  }
-  ::free(line);
-  ::fclose(file);
-
-  if (!found) {
-    *error_errno = 0;
-    *error = "no package named '" + name + "' in " + kPackagesList;
-  }
-  return found;
-}
+// Largest read_file chunk. Comfortably inside the frame limit both sides agree
+// on, with room for the rest of the message.
+constexpr size_t kReadChunkBytes = 1024 * 1024;
 
 // Permanently drops to `uid`, used as both UID and primary GID -- real,
 // effective and saved all at once, so there is no way back to root. Must run
@@ -335,7 +293,7 @@ void ToWire(const KeyParameter& in, pb::KeyParameter* out) {
 // One ListRequest is exactly one keystore2 call. The client owns the capability
 // table that decides between the two, and owns the pagination loop for the
 // batched form; the server just relays.
-void HandleList(IKeystoreService* service, const pb::ListRequest& request, pb::Response* response) {
+void HandleList(IKeystoreService* service, const pb::ListRequest& request, pb::KeystoreResponse* response) {
   // The domain is passed through unvalidated, on purpose: this is a research
   // tool, and rejecting values keystore2 might accept would defeat the point.
   const auto domain = static_cast<Domain>(request.domain());
@@ -368,7 +326,7 @@ void HandleList(IKeystoreService* service, const pb::ListRequest& request, pb::R
 // getKeyEntry also hands back an IKeystoreSecurityLevel; that handle stays here
 // (§3.6) and only the metadata goes on the wire.
 void HandleGetKeyEntry(IKeystoreService* service, const pb::GetKeyEntryRequest& request,
-                       pb::Response* response) {
+                       pb::KeystoreResponse* response) {
   KeyEntryResponse entry;
   const auto status = service->getKeyEntry(FromWire(request.key()), &entry);
   if (!status.isOk()) {
@@ -435,7 +393,7 @@ std::shared_ptr<IKeystoreSecurityLevel> SecurityLevelFor(SessionState* session, 
 std::shared_ptr<IKeystoreOperation> BeginOperation(SessionState* session,
                                                    const pb::OperationStart& start,
                                                    pb::OperationBegun* begun,
-                                                   pb::Response* response) {
+                                                   pb::KeystoreResponse* response) {
   ::ndk::ScopedAStatus status;
   auto level = SecurityLevelFor(session, start.security_level(), &status);
   if (level == nullptr) {
@@ -484,7 +442,7 @@ std::shared_ptr<IKeystoreOperation> BeginOperation(SessionState* session,
 // the conventional shape and keeps one huge parcel off the Binder transaction
 // even when the client sends everything at once.
 void HandleRunOperation(SessionState* session, const pb::RunOperationRequest& request,
-                        pb::Response* response) {
+                        pb::KeystoreResponse* response) {
   pb::OperationBegun begun;
   auto operation = BeginOperation(session, request.start(), &begun, response);
   if (operation == nullptr) return;
@@ -531,7 +489,7 @@ void HandleRunOperation(SessionState* session, const pb::RunOperationRequest& re
 }
 
 void HandleOpBegin(SessionState* session, const pb::OpBeginRequest& request,
-                   pb::Response* response) {
+                   pb::KeystoreResponse* response) {
   if (session->operation != nullptr) {
     FillProtocolError("an operation is already open on this session; finish or abort it first",
                       response->mutable_error());
@@ -548,7 +506,7 @@ void HandleOpBegin(SessionState* session, const pb::OpBeginRequest& request,
 
 // The session's operation is implicit, so every op_* call but begin has to say
 // so when there is nothing open.
-IKeystoreOperation* LiveOperation(SessionState* session, pb::Response* response) {
+IKeystoreOperation* LiveOperation(SessionState* session, pb::KeystoreResponse* response) {
   if (session->operation == nullptr) {
     FillProtocolError("no operation is open on this session", response->mutable_error());
     return nullptr;
@@ -557,7 +515,7 @@ IKeystoreOperation* LiveOperation(SessionState* session, pb::Response* response)
 }
 
 void HandleOpUpdateAad(SessionState* session, const pb::OpUpdateAadRequest& request,
-                       pb::Response* response) {
+                       pb::KeystoreResponse* response) {
   auto* operation = LiveOperation(session, response);
   if (operation == nullptr) return;
 
@@ -570,7 +528,7 @@ void HandleOpUpdateAad(SessionState* session, const pb::OpUpdateAadRequest& requ
 }
 
 void HandleOpUpdate(SessionState* session, const pb::OpUpdateRequest& request,
-                    pb::Response* response) {
+                    pb::KeystoreResponse* response) {
   auto* operation = LiveOperation(session, response);
   if (operation == nullptr) return;
 
@@ -587,7 +545,7 @@ void HandleOpUpdate(SessionState* session, const pb::OpUpdateRequest& request,
 }
 
 void HandleOpFinish(SessionState* session, const pb::OpFinishRequest& request,
-                    pb::Response* response) {
+                    pb::KeystoreResponse* response) {
   auto* operation = LiveOperation(session, response);
   if (operation == nullptr) return;
 
@@ -611,7 +569,7 @@ void HandleOpFinish(SessionState* session, const pb::OpFinishRequest& request,
   if (output.has_value()) result->set_output(output->data(), output->size());
 }
 
-void HandleOpAbort(SessionState* session, pb::Response* response) {
+void HandleOpAbort(SessionState* session, pb::KeystoreResponse* response) {
   auto* operation = LiveOperation(session, response);
   if (operation == nullptr) return;
 
@@ -634,42 +592,17 @@ bool SendFrame(int fd, const google::protobuf::MessageLite& message) {
   return WriteFrame(fd, encoded);
 }
 
-// Establishes a keystore session: drops privileges and connects to keystore2.
-// Every failure is reported in the ack rather than by dropping the connection,
-// so the client always learns why a session did not start.
-std::shared_ptr<IKeystoreService> StartKeystoreSession(int fd, const pb::StartKeystoreSession& start,
-                                                       pb::OpenAck* ack) {
+// Drops privileges and connects to keystore2. Failures are reported in the
+// command response like any other, so the client always learns why.
+std::shared_ptr<IKeystoreService> OpenKeystoreSession(const pb::OpenKeystoreSessionRequest& request,
+                                                      pb::CommandResponse* response) {
+  const auto uid = static_cast<uid_t>(request.uid());
+
   std::string error;
   int error_errno = 0;
-
-  uid_t uid = 0;
-  switch (start.identity_case()) {
-    case pb::StartKeystoreSession::kUid:
-      uid = static_cast<uid_t>(start.uid());
-      break;
-    case pb::StartKeystoreSession::kPackage:
-      // Must happen here, while still root: packages.list is unreadable to the
-      // UID this session is about to become.
-      if (!ResolvePackage(start.package().name(), start.package().user(), &uid, &error,
-                          &error_errno)) {
-        KS_LOGE("%s", error.c_str());
-        FillIdentityError(error, error_errno, ack->mutable_error());
-        SendFrame(fd, *ack);
-        return nullptr;
-      }
-      KS_LOGI("package '%s' user %u is uid=%u", start.package().name().c_str(),
-              start.package().user(), uid);
-      break;
-    case pb::StartKeystoreSession::IDENTITY_NOT_SET:
-      FillProtocolError("keystore session names neither a uid nor a package",
-                        ack->mutable_error());
-      SendFrame(fd, *ack);
-      return nullptr;
-  }
   if (!DropPrivileges(uid, &error, &error_errno)) {
     KS_LOGE("could not become uid=%u: %s", uid, error.c_str());
-    FillIdentityError(error, error_errno, ack->mutable_error());
-    SendFrame(fd, *ack);
+    FillIdentityError(error, error_errno, response->mutable_error());
     return nullptr;
   }
   KS_LOGI("session running as uid=%u", uid);
@@ -677,8 +610,7 @@ std::shared_ptr<IKeystoreService> StartKeystoreSession(int fd, const pb::StartKe
   auto service = ConnectKeystore(&error);
   if (service == nullptr) {
     KS_LOGE("%s", error.c_str());
-    FillIdentityError(error, 0, ack->mutable_error());
-    SendFrame(fd, *ack);
+    FillIdentityError(error, 0, response->mutable_error());
     return nullptr;
   }
 
@@ -689,76 +621,121 @@ std::shared_ptr<IKeystoreService> StartKeystoreSession(int fd, const pb::StartKe
   if (!status.isOk()) {
     const char* message = status.getMessage();
     FillIdentityError(std::string("getInterfaceVersion failed: ") + (message ? message : ""), 0,
-                      ack->mutable_error());
-    SendFrame(fd, *ack);
+                      response->mutable_error());
     return nullptr;
   }
 
-  ack->mutable_keystore()->set_keystore_interface_version(interface_version);
-  ack->mutable_keystore()->set_uid(uid);
+  response->mutable_open_keystore_session()->set_keystore_interface_version(interface_version);
   KS_LOGI("keystore2 interface version %d", interface_version);
-  if (!SendFrame(fd, *ack)) return nullptr;
   return service;
 }
 
-// Acknowledges first, then signals: the client has to learn the kill was
-// accepted, and the supervisor's SIGTERM comes straight back to this child.
-// Still root here -- the UID drop only happens for a keystore session.
-bool KillServer(int fd, pid_t supervisor_pid, pb::OpenAck* ack) {
-  ack->mutable_kill_server();
-  if (!SendFrame(fd, *ack)) return false;
-
-  KS_LOGI("kill_server requested, signalling supervisor %d", supervisor_pid);
-  if (::kill(supervisor_pid, SIGTERM) != 0) {
-    KS_LOGE("could not signal supervisor %d: %s", supervisor_pid, ::strerror(errno));
-    return false;
+// Always runs as root: this is a top-level command, and the only way to reach
+// it is before any session has dropped privileges.
+void HandleReadFile(const pb::ReadFileRequest& request, pb::CommandResponse* response) {
+  const int fd = ::open(request.path().c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    FillIdentityError("could not open '" + request.path() + "': " + ::strerror(errno), errno,
+                      response->mutable_error());
+    return;
   }
-  return true;
+
+  // Clamped so a huge max_length cannot ask for a frame the peer would reject.
+  size_t length = request.max_length() == 0 ? kReadChunkBytes : request.max_length();
+  if (length > kReadChunkBytes) length = kReadChunkBytes;
+
+  std::string buffer(length, '\0');
+  const ssize_t got = ::pread(fd, buffer.data(), length, static_cast<off_t>(request.offset()));
+  const int read_errno = errno;
+  ::close(fd);
+
+  if (got < 0) {
+    FillIdentityError("could not read '" + request.path() + "': " + ::strerror(read_errno),
+                      read_errno, response->mutable_error());
+    return;
+  }
+
+  buffer.resize(static_cast<size_t>(got));
+  auto* result = response->mutable_read_file();
+  result->set_data(buffer);
+  // A short read is only the end of the file if it was short of what was asked
+  // for; pread stops at EOF and nowhere else for a regular file.
+  result->set_eof(static_cast<size_t>(got) < length);
+}
+
+// Answered first, then signalled: the client has to learn the kill was
+// accepted, and the supervisor's SIGTERM comes straight back to this child.
+// Still root here -- privileges only drop when a keystore session opens.
+void HandleKillServer(pid_t supervisor_pid, pb::CommandResponse* response) {
+  response->mutable_kill_server();
+  KS_LOGI("kill_server requested, signalling supervisor %d", supervisor_pid);
 }
 
 }  // namespace
 
 int RunConnection(int fd, pid_t supervisor_pid) {
-  std::string encoded;
-  if (ReadFrame(fd, &encoded) != FrameStatus::kOk) {
-    // Nothing useful to say to a peer that never sent a readable Open.
-    KS_LOGE("open read failed");
-    return 1;
-  }
-
-  pb::OpenAck ack;
-  ack.set_protocol_version(kProtocolVersion);
-
-  pb::Open open;
-  if (!open.ParseFromString(encoded)) {
-    FillProtocolError("malformed open", ack.mutable_error());
-    SendFrame(fd, ack);
-    return 1;
-  }
-  if (open.protocol_version() != kProtocolVersion) {
-    FillProtocolError("unsupported protocol version " +
-                          std::to_string(open.protocol_version()) + ", this server speaks " +
-                          std::to_string(kProtocolVersion),
-                      ack.mutable_error());
-    SendFrame(fd, ack);
-    return 1;
-  }
-
-  if (open.command_case() == pb::Open::kKillServer) {
-    return KillServer(fd, supervisor_pid, &ack) ? 0 : 1;
-  }
-  if (open.command_case() != pb::Open::kKeystore) {
-    // Also what a newer client's unimplemented command looks like here: its
-    // field number is unknown to this build, so no oneof arm is set.
-    FillProtocolError("open names no command this server implements", ack.mutable_error());
-    SendFrame(fd, ack);
-    return 1;
-  }
+  // The server speaks first, so version validation happens once and the
+  // client's command stream needs no special first message.
+  pb::Greeting greeting;
+  greeting.set_protocol_version(kProtocolVersion);
+  if (!SendFrame(fd, greeting)) return 1;
 
   SessionState session;
-  session.service = StartKeystoreSession(fd, open.keystore(), &ack);
-  if (session.service == nullptr) return 1;
+  std::string encoded;
 
+  // Top level: root, one Command at a time, until one opens a session.
+  while (session.service == nullptr) {
+    const FrameStatus frame_status = ReadFrame(fd, &encoded);
+    if (frame_status == FrameStatus::kEof) return 0;
+    if (frame_status != FrameStatus::kOk) {
+      KS_LOGE("command read failed: %s", ToString(frame_status));
+      return 1;
+    }
+
+    pb::CommandResponse response;
+    pb::Command command;
+    bool kill_requested = false;
+
+    if (!command.ParseFromString(encoded)) {
+      FillProtocolError("malformed command", response.mutable_error());
+    } else {
+      switch (command.body_case()) {
+        case pb::Command::kReadFile:
+          HandleReadFile(command.read_file(), &response);
+          break;
+        case pb::Command::kKillServer:
+          HandleKillServer(supervisor_pid, &response);
+          kill_requested = true;
+          break;
+        case pb::Command::kOpenKeystoreSession:
+          // Irreversible: from here the connection is a keystore session and
+          // nothing else, because the UID drop cannot be undone.
+          session.service = OpenKeystoreSession(command.open_keystore_session(), &response);
+          break;
+        case pb::Command::BODY_NOT_SET:
+          // Also what a newer client's unimplemented command looks like here:
+          // its field number is unknown to this build, so no arm is set.
+          FillProtocolError("command names nothing this server implements",
+                            response.mutable_error());
+          break;
+      }
+    }
+
+    if (!SendFrame(fd, response)) {
+      KS_LOGE("command response write failed: %s", ::strerror(errno));
+      return 1;
+    }
+
+    if (kill_requested) {
+      if (::kill(supervisor_pid, SIGTERM) != 0) {
+        KS_LOGE("could not signal supervisor %d: %s", supervisor_pid, ::strerror(errno));
+        return 1;
+      }
+      return 0;
+    }
+  }
+
+  // Keystore subprotocol: only these messages, for the rest of the connection.
   for (;;) {
     const FrameStatus frame_status = ReadFrame(fd, &encoded);
     if (frame_status == FrameStatus::kEof) return 0;
@@ -767,37 +744,37 @@ int RunConnection(int fd, pid_t supervisor_pid) {
       return 1;
     }
 
-    pb::Response response;
-    pb::Request request;
+    pb::KeystoreResponse response;
+    pb::KeystoreRequest request;
     if (!request.ParseFromString(encoded)) {
       FillProtocolError("malformed request", response.mutable_error());
     } else {
       switch (request.body_case()) {
-        case pb::Request::kList:
+        case pb::KeystoreRequest::kList:
           HandleList(session.service.get(), request.list(), &response);
           break;
-        case pb::Request::kGetKeyEntry:
+        case pb::KeystoreRequest::kGetKeyEntry:
           HandleGetKeyEntry(session.service.get(), request.get_key_entry(), &response);
           break;
-        case pb::Request::kRunOperation:
+        case pb::KeystoreRequest::kRunOperation:
           HandleRunOperation(&session, request.run_operation(), &response);
           break;
-        case pb::Request::kOpBegin:
+        case pb::KeystoreRequest::kOpBegin:
           HandleOpBegin(&session, request.op_begin(), &response);
           break;
-        case pb::Request::kOpUpdateAad:
+        case pb::KeystoreRequest::kOpUpdateAad:
           HandleOpUpdateAad(&session, request.op_update_aad(), &response);
           break;
-        case pb::Request::kOpUpdate:
+        case pb::KeystoreRequest::kOpUpdate:
           HandleOpUpdate(&session, request.op_update(), &response);
           break;
-        case pb::Request::kOpFinish:
+        case pb::KeystoreRequest::kOpFinish:
           HandleOpFinish(&session, request.op_finish(), &response);
           break;
-        case pb::Request::kOpAbort:
+        case pb::KeystoreRequest::kOpAbort:
           HandleOpAbort(&session, &response);
           break;
-        case pb::Request::BODY_NOT_SET:
+        case pb::KeystoreRequest::BODY_NOT_SET:
           // Also what a newer client's unimplemented RPC looks like here: its
           // field number is unknown to this build, so no oneof arm is set.
           FillProtocolError("request has no body this server implements", response.mutable_error());

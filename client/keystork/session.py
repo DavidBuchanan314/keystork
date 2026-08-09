@@ -429,12 +429,12 @@ class Operation:
 
     def update_aad(self, aad: bytes) -> None:
         """Feed associated data. Must precede any :meth:`update`."""
-        self._session._exchange(pb.Request(op_update_aad=pb.OpUpdateAadRequest(aad=bytes(aad))))
+        self._session._exchange(pb.KeystoreRequest(op_update_aad=pb.OpUpdateAadRequest(aad=bytes(aad))))
 
     def update(self, data: bytes) -> bytes:
         """Feed input, returning whatever KeyMint chose to emit -- often nothing."""
         response = self._session._exchange(
-            pb.Request(op_update=pb.OpUpdateRequest(input=bytes(data)))
+            pb.KeystoreRequest(op_update=pb.OpUpdateRequest(input=bytes(data)))
         )
         return response.op_update.output if response.op_update.HasField("output") else b""
 
@@ -447,7 +447,7 @@ class Operation:
             request.signature = bytes(signature)
 
         try:
-            response = self._session._exchange(pb.Request(op_finish=request))
+            response = self._session._exchange(pb.KeystoreRequest(op_finish=request))
         finally:
             # finish() consumes the operation on the device whether or not it
             # succeeded, so there is nothing left to abort either way.
@@ -459,7 +459,7 @@ class Operation:
         if self._done:
             return
         self._done = True
-        self._session._exchange(pb.Request(op_abort=pb.OpAbortRequest()))
+        self._session._exchange(pb.KeystoreRequest(op_abort=pb.OpAbortRequest()))
 
 
 @dataclass(frozen=True)
@@ -491,78 +491,190 @@ class Device:
         return f"{self.host}:{self.port}"
 
 
-def _open(device: Optional[Device], command: pb.Open) -> "tuple[Transport, pb.OpenAck]":
-    """Dial, send the opening command, and check the ack.
+#: How much of a file to ask for per round-trip. Matches the server's own clamp.
+READ_CHUNK_BYTES = 1024 * 1024
 
-    Every connection starts this way, whether or not it goes on to be a session.
+#: Where the package manager records which UID each package runs as. Root-only,
+#: which is why it is read with a top-level command before any session opens.
+PACKAGES_LIST = "/data/system/packages.list"
+
+#: Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
+USER_OFFSET = 100000
+
+
+def parse_packages_list(data: bytes) -> "Dict[str, int]":
+    """Package name to user-0 UID, from the contents of `PACKAGES_LIST`.
+
+    Each line is space-separated with the name first and its UID second;
+    everything after that is ignored. The mapping is many-to-one -- packages
+    sharing a ``sharedUserId`` share a UID -- so only this direction is
+    well-defined.
     """
-    transport = Transport((device or Device()).dial())
-    command.protocol_version = PROTOCOL_VERSION
-    try:
-        transport.send(command)
-        ack = transport.recv(pb.OpenAck())
-        if ack.HasField("error"):
-            raise errors.from_wire(ack.error)
-        if ack.protocol_version != PROTOCOL_VERSION:
-            raise errors.ProtocolError(
-                f"daemon speaks protocol version {ack.protocol_version}, "
-                f"this client speaks {PROTOCOL_VERSION}"
-            )
-    except BaseException:
-        transport.close()
-        raise
-    return transport, ack
+    packages: Dict[str, int] = {}
+    for line in data.decode(errors="replace").splitlines():
+        fields = line.split(" ", 2)
+        if len(fields) < 2:
+            continue
+        try:
+            packages[fields[0]] = int(fields[1])
+        except ValueError:
+            continue
+    return packages
 
 
-def kill_server(device: Optional[Device] = None) -> None:
-    """Stop the daemon.
+class Connection:
+    """A connection to the daemon, at the top level.
 
-    The supervisor SIGTERMs every live session and exits, so other clients lose
-    their connections too. One message and one ack, so it is a function rather
-    than a session.
-    """
-    transport, _ = _open(device, pb.Open(kill_server=pb.KillServer()))
-    transport.close()
+    The daemon is root here, and every exchange is one command: read a file,
+    stop the server, or open a session. :meth:`open_keystore_session` is an
+    irreversible state change -- after it the connection is a keystore session
+    and nothing else, because the UID drop cannot be undone.
 
-
-class Session:
-    """Base for anything that keeps a connection open after the initial command.
-
-    Subclasses send their own :class:`Open` command and own whatever RPCs that
-    command's session understands. The `device` is dialed exactly once, in the
-    constructor: a session's identity is bound to its connection, so reconnecting
-    would silently be a *different* session under a different child.
+    >>> with Connection(device) as conn:
+    ...     data = conn.read_file(PACKAGES_LIST)
+    ...     ks = conn.open_keystore_session(uid=10207)
+    ...     ks.list()
     """
 
-    def __init__(self, device: Optional[Device], command: pb.Open) -> None:
+    def __init__(self, device: Optional[Device] = None) -> None:
         self._device = device or Device()
-        self._transport, self._ack = _open(self._device, command)
+        self._transport = Transport(self._device.dial())
+        self._session_open = False
+
+        try:
+            greeting = self._transport.recv(pb.Greeting())
+            if greeting.protocol_version != PROTOCOL_VERSION:
+                raise errors.ProtocolError(
+                    f"daemon speaks protocol version {greeting.protocol_version}, "
+                    f"this client speaks {PROTOCOL_VERSION}"
+                )
+        except BaseException:
+            self._transport.close()
+            raise
 
     @property
     def device(self) -> Device:
         return self._device
 
+    @property
+    def session_open(self) -> bool:
+        """True once a session has taken over; no command is valid after that."""
+        return self._session_open
 
-class KeystoreSession(Session):
-    """One UID-scoped keystore2 session. Use it as a context manager.
+    def _command(self, command: pb.Command) -> pb.CommandResponse:
+        if self._session_open:
+            raise errors.ProtocolError(
+                "this connection is a keystore session; top-level commands are no longer valid"
+            )
+        self._transport.send(command)
+        response = self._transport.recv(pb.CommandResponse())
+        if response.WhichOneof("body") == "error":
+            raise errors.from_wire(response.error)
+        return response
 
-    Constructing one opens the connection and establishes the session, so it is
-    live -- or has raised -- by the time you have the object.
+    def read_file(self, path: str, *, offset: int = 0, length: Optional[int] = None) -> bytes:
+        """Read a file from the device, as root.
+
+        Loops until the daemon reports end of file, or until `length` bytes have
+        been collected. Only valid before a session opens: reading is a
+        privileged operation and privileges are gone after that.
+        """
+        chunks: List[bytes] = []
+        collected = 0
+        while length is None or collected < length:
+            want = READ_CHUNK_BYTES if length is None else min(READ_CHUNK_BYTES, length - collected)
+            response = self._command(
+                pb.Command(
+                    read_file=pb.ReadFileRequest(path=path, offset=offset, max_length=want)
+                )
+            ).read_file
+            chunks.append(response.data)
+            collected += len(response.data)
+            offset += len(response.data)
+            if response.eof:
+                break
+            if not response.data:
+                # No progress and no eof: stop rather than spin forever.
+                break
+        return b"".join(chunks)
+
+    def packages(self) -> "Dict[str, int]":
+        """Every package on the device, mapped to its user-0 UID."""
+        return parse_packages_list(self.read_file(PACKAGES_LIST))
+
+    def resolve_package(self, name: str, user: int = 0) -> int:
+        """The UID `name` runs as, for Android user `user`."""
+        packages = self.packages()
+        if name not in packages:
+            raise errors.IdentityError(f"no package named {name!r} in {PACKAGES_LIST}", 0)
+        return packages[name] % USER_OFFSET + user * USER_OFFSET
+
+    def kill_server(self) -> None:
+        """Stop the daemon. Every live session goes with it."""
+        self._command(pb.Command(kill_server=pb.KillServerRequest()))
+        self.close()
+
+    def _open_keystore(self, uid: int) -> pb.KeystoreSessionOpened:
+        if uid < 0:
+            raise ValueError(f"uid must be non-negative, got {uid}")
+        response = self._command(
+            pb.Command(open_keystore_session=pb.OpenKeystoreSessionRequest(uid=uid))
+        )
+        self._session_open = True
+        return response.open_keystore_session
+
+    def open_keystore_session(self, uid: int) -> "KeystoreSession":
+        """Become `uid` and hand the connection over to a keystore session.
+
+        One-way: this connection can never open another session or run another
+        top-level command.
+        """
+        return KeystoreSession._attach(self, uid, self._open_keystore(uid), None)
+
+    def close(self) -> None:
+        self._transport.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._transport.closed
+
+    def __enter__(self) -> "Connection":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        state = "closed" if self.closed else ("session" if self._session_open else "top level")
+        return f"<keystork.Connection {self._device} {state}>"
+
+
+def kill_server(device: Optional[Device] = None) -> None:
+    """Stop the daemon on `device`."""
+    with Connection(device) as connection:
+        connection.kill_server()
+
+
+class KeystoreSession:
+    """One UID-scoped keystore2 session: a connection that has transitioned.
+
+    Constructing one opens a connection and transitions it, so the session is
+    live -- or has raised -- by the time you have the object. Closing it closes
+    the connection, which is the same thing: the transition is one-way.
 
     >>> with KeystoreSession(uid=10123) as ks:
     ...     for key in ks.list():
     ...         print(key)
 
-    Or name a package and let the device resolve it -- the mapping lives in the
-    package manager's records, which only the device can read:
+    Naming a package resolves it here in the client, by reading the device's
+    package list over the same connection while it is still root:
 
     >>> with KeystoreSession(package="com.google.android.gms") as ks:
     ...     ks.uid
     10207
 
-    >>> device = Device(host="127.0.0.1", port=9432)
-    >>> with KeystoreSession(uid=10123, device=device) as ks:
-    ...     ks.list()
+    :meth:`Connection.open_keystore_session` is the other way in, for when the
+    connection has already done something at the top level.
     """
 
     def __init__(
@@ -575,24 +687,43 @@ class KeystoreSession(Session):
     ) -> None:
         if (uid is None) == (package is None):
             raise ValueError("name exactly one of uid or package")
-        if uid is not None and uid < 0:
-            raise ValueError(f"uid must be non-negative, got {uid}")
         if user < 0:
             raise ValueError(f"user must be non-negative, got {user}")
 
-        if package is not None:
-            identity = pb.StartKeystoreSession(
-                package=pb.PackageIdentity(name=package, user=user)
-            )
-        else:
-            identity = pb.StartKeystoreSession(uid=uid)
+        connection = Connection(device)
+        try:
+            if package is not None:
+                uid = connection.resolve_package(package, user)
+            self._adopt(connection, uid, connection._open_keystore(uid), package)
+        except BaseException:
+            connection.close()
+            raise
 
-        super().__init__(device, pb.Open(keystore=identity))
-        # What the daemon actually became, which is the only authority when the
-        # session was opened by package name.
-        self._uid = self._ack.keystore.uid
+    @classmethod
+    def _attach(
+        cls,
+        connection: Connection,
+        uid: int,
+        opened: pb.KeystoreSessionOpened,
+        package: Optional[str],
+    ) -> "KeystoreSession":
+        """Wrap a connection that has already transitioned, without dialing."""
+        session = cls.__new__(cls)
+        session._adopt(connection, uid, opened, package)
+        return session
+
+    def _adopt(
+        self,
+        connection: Connection,
+        uid: int,
+        opened: pb.KeystoreSessionOpened,
+        package: Optional[str],
+    ) -> None:
+        self._connection = connection
+        self._transport = connection._transport
+        self._uid = uid
         self._package = package
-        self._interface_version = self._ack.keystore.keystore_interface_version
+        self._interface_version = opened.keystore_interface_version
         self._characteristics: Dict[str, KeyMetadata] = {}
 
     # -- properties ---------------------------------------------------------
@@ -690,7 +821,7 @@ class KeystoreSession(Session):
         crypto calls consult when you leave their parameters unset.
         """
         request = pb.GetKeyEntryRequest(key=_key_descriptor(key)._to_wire())
-        response = self._exchange(pb.Request(get_key_entry=request))
+        response = self._exchange(pb.KeystoreRequest(get_key_entry=request))
         return KeyMetadata._from_wire(response.get_key_entry.metadata)
 
     def characteristics(self, key: KeyRef) -> KeyMetadata:
@@ -733,7 +864,7 @@ class KeystoreSession(Session):
         if signature is not None:
             request.signature = bytes(signature)
 
-        result = self._exchange(pb.Request(run_operation=request)).run_operation
+        result = self._exchange(pb.KeystoreRequest(run_operation=request)).run_operation
         return OperationResult(
             begun=OperationBegun._from_wire(result.begun),
             output=result.output if result.HasField("output") else b"",
@@ -761,7 +892,7 @@ class KeystoreSession(Session):
         request = pb.OpBeginRequest(
             start=self._operation_start(key, parameters, forced, security_level)
         )
-        response = self._exchange(pb.Request(op_begin=request))
+        response = self._exchange(pb.KeystoreRequest(op_begin=request))
         operation = Operation(self, OperationBegun._from_wire(response.op_begin.begun))
         try:
             yield operation
@@ -994,24 +1125,24 @@ class KeystoreSession(Session):
         if cursor is not None:
             request.starting_past_alias = cursor
 
-        response = self._exchange(pb.Request(list=request))
+        response = self._exchange(pb.KeystoreRequest(list=request))
         if response.WhichOneof("body") != "list":
             raise errors.ProtocolError(
                 f"expected a list response, got {response.WhichOneof('body')!r}"
             )
         return [KeyDescriptor._from_wire(entry) for entry in response.list.entries]
 
-    def _exchange(self, request: pb.Request) -> pb.Response:
+    def _exchange(self, request: pb.KeystoreRequest) -> pb.KeystoreResponse:
         """One request, one response. The session allows nothing in between."""
         self._transport.send(request)
-        response = self._transport.recv(pb.Response())
+        response = self._transport.recv(pb.KeystoreResponse())
         if response.WhichOneof("body") == "error":
             raise errors.from_wire(response.error)
         return response
 
     def close(self) -> None:
-        """End the session. The daemon's child exits when the socket closes."""
-        self._transport.close()
+        """End the session, and with it the connection it took over."""
+        self._connection.close()
 
     @property
     def closed(self) -> bool:
@@ -1028,4 +1159,4 @@ class KeystoreSession(Session):
         who = f"uid={self._uid}"
         if self._package is not None:
             who = f"{self._package} ({who})"
-        return f"<keystork.KeystoreSession {who} on {self._device} {state}>"
+        return f"<keystork.KeystoreSession {who} on {self._connection.device} {state}>"
