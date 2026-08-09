@@ -313,6 +313,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "args", nargs=argparse.REMAINDER, help="arguments after argv[0], which is PATH"
     )
 
+    injecting = commands.add_parser(
+        "inject",
+        help="launch an app and load the agent into it before its own code runs",
+        description="Force-stops the package, seizes the zygote, launches the app, and catches "
+        "the forked process at the point it takes the app's UID -- before ActivityThread.main, "
+        "so none of the app's own code has run. Takes seconds rather than a round trip; watch "
+        "`keystork exec /system/bin/logcat -s keystorkd keystork-agent` for the detail.",
+    )
+    injecting.add_argument("package", help="the app to launch and inject into")
+    injecting.add_argument(
+        "--uid", type=int, help="the UID to expect (default: resolved from the package list)"
+    )
+    injecting.add_argument("--user", type=int, default=0, help="Android user id (default: 0)")
+    injecting.add_argument(
+        "--timeout-ms", type=int, help="give up if the app has not forked in this long"
+    )
+
     commands.add_parser(
         "kill-server",
         help="stop the daemon",
@@ -568,6 +585,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 packages = connection.packages()
             for name in sorted(packages):
                 print(f"{packages[name]}\t{name}")
+            return 0
+
+        if args.command == "inject":
+            with Connection(device) as connection:
+                result = connection.inject(
+                    args.package, uid=args.uid, user=args.user, timeout_ms=args.timeout_ms
+                )
+            outcome = result.Outcome.Name(result.outcome)
+            print(f"pid       {result.pid}")
+            print(f"uid       {result.uid}")
+            print(f"outcome   {outcome}")
+            if outcome == "RETURNED":
+                print(f"handle    {result.handle:#x}")
+                if result.handle == 0:
+                    print("the linker refused the agent; see logcat -s keystorkd", file=sys.stderr)
+                    return 1
+            elif outcome == "EXITED":
+                print(f"exit      {result.exit_status}")
+            elif outcome == "FAULTED":
+                print(f"fault     signal {result.fault_signal} at {result.fault_address:#x}")
+                return 1
             return 0
 
         if args.command == "shell":

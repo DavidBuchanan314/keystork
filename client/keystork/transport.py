@@ -13,8 +13,10 @@ framing with the socket left to the caller, which is what
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import struct
+from typing import Optional
 
 from .errors import ConnectionClosed, ProtocolError
 
@@ -119,6 +121,25 @@ class Transport:
                 sock.close()
             except OSError:
                 pass
+
+    @contextlib.contextmanager
+    def deadline(self, timeout: Optional[float]):
+        """Widen the socket timeout for one exchange, then put it back.
+
+        For the commands that go away and do something rather than answering
+        immediately. `None` leaves the socket as it is.
+        """
+        sock = self._require_open()
+        if timeout is None:
+            yield
+            return
+        previous = sock.gettimeout()
+        sock.settimeout(timeout)
+        try:
+            yield
+        finally:
+            if self._sock is not None:
+                self._sock.settimeout(previous)
 
     def detach(self) -> socket.socket:
         """Hand the socket to someone else, still open.

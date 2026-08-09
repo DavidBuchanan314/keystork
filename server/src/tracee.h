@@ -38,6 +38,10 @@ class Tracee {
   // cached; 0 if it could not be found, with the reason in error().
   uint64_t SyscallInstruction();
 
+  // The thread's registers as they are right now. Useful without a Borrow when
+  // all that is wanted is to look -- which syscall a stop belongs to, say.
+  bool ReadRegisters(user_regs_struct* out);
+
   // Set by any failure of the machinery itself, and sticky. A syscall the
   // kernel *refused* is not this -- that comes back as a negative errno in the
   // result, the same as the kernel gives libc.
@@ -61,6 +65,12 @@ class Tracee {
 // and the tracee is the same image at two addresses, so a symbol resolved
 // locally with dlsym is (symbol - local_base + remote_base) over there.
 bool FindModuleBase(pid_t tid, const char* path_suffix, uint64_t* base);
+
+// The file mapped over `address` in `tid`: its path, and the base it is loaded
+// at. Turns a symbol resolved locally with dlsym into a remote address without
+// having to know which library it came out of -- which matters when the answer
+// differs by release, as it does for the dlopen entry points.
+bool FindModuleForAddress(pid_t tid, uint64_t address, std::string* path, uint64_t* base);
 
 // What became of a Borrow::Call.
 struct CallResult {

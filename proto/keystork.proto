@@ -116,6 +116,7 @@ message Command {
     KillServerRequest kill_server = 2;
     OpenKeystoreSessionRequest open_keystore_session = 3;
     ExecRequest exec = 4;
+    InjectRequest inject = 5;
   }
 }
 
@@ -126,7 +127,68 @@ message CommandResponse {
     KillServerResponse kill_server = 3;
     KeystoreSessionOpened open_keystore_session = 4;
     ExecStarted exec = 5;
+    InjectResponse inject = 6;
   }
+}
+
+// Launches `package` and loads the daemon's embedded agent into it before any
+// of the app's own code has run.
+//
+// Unlike everything else at this level this takes seconds rather than a round
+// trip, because it has to catch a zygote fork: the daemon force-stops the
+// package, seizes the zygote with PTRACE_O_TRACEFORK, launches the app, and
+// steps the forked child until it drops to `uid`. Progress goes to logcat --
+// `logcat -s keystorkd` -- since there is nowhere else for it to go in a
+// single request/response.
+//
+// This is not a session. When there is state worth holding open -- a warm
+// token provider for Standard-mode integrity -- it becomes one.
+message InjectRequest {
+  // Resolved to a component and launched. The daemon has no notion of
+  // packages beyond handing this to `am`.
+  string package = 1;
+
+  // Which UID the forked child must drop to for the daemon to claim it as the
+  // target. The daemon does not resolve this: the client reads the device's
+  // package list at this same level, while it is still root, exactly as it
+  // does for a keystore session.
+  uint32 uid = 2;
+
+  // Gives up if the app has not forked and specialized within this long.
+  // Unset uses the daemon's own default, which is comfortably inside AMS's
+  // ten-second process-start timeout.
+  optional uint32 timeout_ms = 3;
+}
+
+message InjectResponse {
+  // The app process that was caught, and the UID it had become.
+  int32 pid = 1;
+  uint32 uid = 2;
+
+  // What became of the dlopen. Not an error/success pair: an agent whose
+  // constructor calls _exit never lets dlopen return, so EXITED is the
+  // ordinary outcome rather than a failure, and the three have to be told
+  // apart rather than collapsed.
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+
+    // dlopen returned; `handle` is what it gave back. Zero means the linker
+    // refused the library, and the daemon logged its reason.
+    RETURNED = 1;
+
+    // The process died inside dlopen. `exit_status` is the raw wait status.
+    EXITED = 2;
+
+    // Something faulted that was not the return trap -- the agent's
+    // constructor crashing, most likely.
+    FAULTED = 3;
+  }
+
+  Outcome outcome = 3;
+  uint64 handle = 4;
+  int32 exit_status = 5;
+  int32 fault_signal = 6;
+  uint64 fault_address = 7;
 }
 
 // Reads part of a file, always as root -- which is why this is a top-level

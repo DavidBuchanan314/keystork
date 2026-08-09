@@ -148,6 +148,21 @@ bool FindModuleBase(pid_t tid, const char* path_suffix, uint64_t* base) {
   });
 }
 
+bool FindModuleForAddress(pid_t tid, uint64_t address, std::string* path, uint64_t* base) {
+  std::string found;
+  const bool located = ScanMaps(tid, [&](uint64_t from, uint64_t to, uint64_t, const char* name) {
+    if (address < from || address >= to || name[0] == '\0' || name[0] == '[') return false;
+    found = name;
+    return true;
+  });
+  if (!located) return false;
+  // The mapping the address landed in is some segment of the file; the base is
+  // the offset-zero one, which may well be a different line.
+  if (!FindModuleBase(tid, found.c_str(), base)) return false;
+  *path = found;
+  return true;
+}
+
 std::string Describe(const CallResult& result) {
   switch (result.outcome) {
     case CallResult::Outcome::kReturned:
@@ -187,6 +202,12 @@ bool Tracee::WriteMemory(uint64_t address, const void* data, size_t length) {
   if (put == static_cast<ssize_t>(length)) return true;
   Fail("could not write " + std::to_string(length) + " bytes at " + std::to_string(address) +
        " in " + std::to_string(tid_) + ": " + ::strerror(errno));
+  return false;
+}
+
+bool Tracee::ReadRegisters(user_regs_struct* out) {
+  if (GetRegisters(tid_, out)) return true;
+  Fail("could not read registers of " + std::to_string(tid_) + ": " + ::strerror(errno));
   return false;
 }
 

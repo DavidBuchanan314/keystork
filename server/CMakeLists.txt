@@ -24,7 +24,8 @@ if(NOT DEFINED ANDROID_STL)
     set(ANDROID_STL "c++_static" CACHE STRING "Android C++ runtime")
 endif()
 
-project(keystorkd LANGUAGES C CXX)
+# ASM is for the generated stub that .incbin's the agent into .rodata.
+project(keystorkd LANGUAGES C CXX ASM)
 
 if(NOT ANDROID)
     message(FATAL_ERROR
@@ -213,6 +214,34 @@ target_link_libraries(keystore_aidl PUBLIC binder_ndk_headers)
 target_compile_options(keystore_aidl PRIVATE -w)
 
 # ---------------------------------------------------------------------------
+# The injected agent
+#
+# Built for the same ABI as the daemon, then embedded in it. Nothing is ever
+# pushed to the device but keystorkd itself: the agent reaches the target
+# through a memfd, so it needs no path, no filesystem access, and no SELinux
+# label of its own.
+# ---------------------------------------------------------------------------
+
+add_library(keystork_agent SHARED agent/agent.c)
+set_target_properties(keystork_agent PROPERTIES OUTPUT_NAME keystork-agent)
+target_compile_options(keystork_agent PRIVATE -Wall -Wextra -fvisibility=hidden)
+# -s here rather than a POST_BUILD strip: what gets embedded is whatever the
+# link produced, so the shrinking has to happen during it.
+target_link_options(keystork_agent PRIVATE -s -Wl,--exclude-libs,ALL)
+target_link_libraries(keystork_agent PRIVATE log)
+
+set(AGENT_BLOB "${CMAKE_CURRENT_BINARY_DIR}/gen/agent_blob.S")
+add_custom_command(
+    OUTPUT "${AGENT_BLOB}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DAGENT=$<TARGET_FILE:keystork_agent>"
+            "-DOUTPUT=${AGENT_BLOB}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_agent.cmake"
+    DEPENDS keystork_agent "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_agent.cmake"
+    COMMENT "embedding $<TARGET_FILE_NAME:keystork_agent> into the daemon"
+    VERBATIM)
+
+# ---------------------------------------------------------------------------
 # keystorkd
 # ---------------------------------------------------------------------------
 
@@ -220,9 +249,11 @@ add_executable(keystorkd
     src/main.cpp
     src/exec.cpp
     src/framing.cpp
+    src/inject.cpp
     src/session.cpp
     src/status.cpp
     src/tracee.cpp
+    "${AGENT_BLOB}"
     "${PROTO_SRC}")
 
 target_include_directories(keystorkd PRIVATE src "${PROTO_GEN_DIR}")

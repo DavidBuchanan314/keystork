@@ -575,14 +575,17 @@ class Connection:
         """True once something has taken over; no command is valid after that."""
         return self._session_open
 
-    def _command(self, command: pb.Command) -> pb.CommandResponse:
+    def _command(self, command: pb.Command, timeout: Optional[float] = None) -> pb.CommandResponse:
         if self._session_open:
             raise errors.ProtocolError(
                 f"this connection is {self._handed_to}; "
                 "top-level commands are no longer valid"
             )
         self._transport.send(command)
-        response = self._transport.recv(pb.CommandResponse())
+        # A command that works rather than answers -- inject waits on a zygote
+        # fork -- needs a bound of its own; the default one bounds a round trip.
+        with self._transport.deadline(timeout):
+            response = self._transport.recv(pb.CommandResponse())
         if response.WhichOneof("body") == "error":
             raise errors.from_wire(response.error)
         return response
@@ -708,6 +711,35 @@ class Connection:
         # The two directions run independently from here, so the framed
         # request/response transport has nothing left to do.
         return Process(self._transport.detach(), started)
+
+    def inject(
+        self,
+        package: str,
+        *,
+        uid: Optional[int] = None,
+        user: int = 0,
+        timeout_ms: Optional[int] = None,
+    ) -> pb.InjectResponse:
+        """Launch `package` and load the daemon's agent into it before its own code runs.
+
+        Seconds rather than a round trip: the daemon force-stops the package,
+        seizes the zygote, launches the app, and steps the forked child until
+        it takes the app's UID. Progress goes to logcat, since a single
+        request/response has nowhere else to put it.
+
+        `uid` is resolved from the device's package list over this same
+        connection if not given -- the daemon has no notion of packages beyond
+        handing the name to ``am``.
+        """
+        if uid is None:
+            uid = self.resolve_package(package, user)
+        request = pb.InjectRequest(package=package, uid=uid)
+        if timeout_ms is not None:
+            request.timeout_ms = timeout_ms
+        # The daemon spends most of this waiting on a fork, so the usual
+        # per-round-trip timeout is the wrong bound.
+        deadline = (timeout_ms or 15000) / 1000 + 20
+        return self._command(pb.Command(inject=request), timeout=deadline).inject
 
     def _open_keystore(self, uid: int) -> pb.KeystoreSessionOpened:
         if uid < 0:

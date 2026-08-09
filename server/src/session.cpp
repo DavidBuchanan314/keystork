@@ -34,6 +34,7 @@
 
 #include "exec.h"
 #include "framing.h"
+#include "inject.h"
 #include "keystork.pb.h"
 #include "log.h"
 #include "status.h"
@@ -733,6 +734,11 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           }
           break;
         }
+        case pb::Command::kInject:
+          // Seconds rather than a round trip, and the only command here that
+          // is neither instant nor a hand-over: it has to catch a zygote fork.
+          HandleInject(command.inject(), &response);
+          break;
         case pb::Command::BODY_NOT_SET:
           // Also what a newer client's unimplemented command looks like here:
           // its field number is unknown to this build, so no arm is set.
