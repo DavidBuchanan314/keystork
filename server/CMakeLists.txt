@@ -222,6 +222,7 @@ add_executable(keystorkd
     src/framing.cpp
     src/session.cpp
     src/status.cpp
+    src/tracee.cpp
     "${PROTO_SRC}")
 
 target_include_directories(keystorkd PRIVATE src "${PROTO_GEN_DIR}")
