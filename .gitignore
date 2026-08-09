@@ -79,3 +79,7 @@ design_docs/
 __pycache__/
 *.py[codz]
 *$py.class
+
+# Gradle build of the agent's APK
+server/agent/apk/build/
+server/agent/apk/.gradle/

@@ -216,80 +216,57 @@ target_compile_options(keystore_aidl PRIVATE -w)
 # ---------------------------------------------------------------------------
 # The agent's dex
 #
-# The Java half, compiled and dexed at build time and embedded in the agent,
-# which is itself embedded in the daemon. Two levels of .incbin so that what
+# The Java half is an ordinary Android app under agent/apk/, built by Gradle,
+# and what is taken from it is classes.dex -- which is then embedded in the
+# agent, which is embedded in the daemon. Two levels of .incbin so that what
 # lands on the device is still one file and the dex never touches a filesystem
 # at either end.
 #
-# Needs a JDK and two things from the Android SDK: android.jar to compile
-# against, and d8 to convert class files to dex. Recent cmdline-tools bundle
-# d8, so the separate build-tools package is not required.
+# An app build rather than javac + d8 because the Java half now has a real
+# dependency (the Play Integrity SDK), and resolving a dependency's transitive
+# closure and dexing it is precisely what the Android build does. Nothing is
+# installed: the APK is a container we open.
+#
+# Gradle is invoked through the wrapper checked in beside the module, so the
+# version is a property of this repository rather than of whatever is on PATH
+# -- which matters, since AGP 8.x cannot run on Gradle 9.6 or newer.
 # ---------------------------------------------------------------------------
 
 set(KEYSTORK_ANDROID_SDK "$ENV{ANDROID_HOME}" CACHE PATH
-    "Android SDK root, for android.jar and d8")
+    "Android SDK root, passed to Gradle as ANDROID_HOME")
 
 if(NOT KEYSTORK_ANDROID_SDK)
     message(FATAL_ERROR
         "No Android SDK. Set ANDROID_HOME, or pass -DKEYSTORK_ANDROID_SDK=<path>.\n"
-        "It needs platforms/android-<N>/android.jar and a d8 (in cmdline-tools/latest/bin "
-        "or build-tools/<version>).")
+        "The agent's dex is built by Gradle, which needs platforms/android-36 and "
+        "a build-tools package:\n"
+        "  sdkmanager \"platforms;android-36\" \"build-tools;36.0.0\"")
 endif()
 
-# Newest installed platform. NATURAL so android-9 does not sort above
-# android-36.
-file(GLOB KEYSTORK_PLATFORMS "${KEYSTORK_ANDROID_SDK}/platforms/android-*")
-list(SORT KEYSTORK_PLATFORMS COMPARE NATURAL ORDER DESCENDING)
-list(GET KEYSTORK_PLATFORMS 0 KEYSTORK_PLATFORM)
-set(ANDROID_JAR "${KEYSTORK_PLATFORM}/android.jar")
-if(NOT EXISTS "${ANDROID_JAR}")
-    message(FATAL_ERROR
-        "No android.jar under ${KEYSTORK_ANDROID_SDK}/platforms.\n"
-        "  sdkmanager --sdk_root=${KEYSTORK_ANDROID_SDK} \"platforms;android-36\"")
-endif()
-
-file(GLOB KEYSTORK_BUILD_TOOLS "${KEYSTORK_ANDROID_SDK}/build-tools/*")
-find_program(D8_EXECUTABLE NAMES d8
-    PATHS "${KEYSTORK_ANDROID_SDK}/cmdline-tools/latest/bin" ${KEYSTORK_BUILD_TOOLS}
-    NO_DEFAULT_PATH)
-if(NOT D8_EXECUTABLE)
-    message(FATAL_ERROR
-        "No d8 under ${KEYSTORK_ANDROID_SDK}. It ships in cmdline-tools/latest/bin, "
-        "or in any build-tools package.")
-endif()
-
-find_program(JAVAC_EXECUTABLE javac REQUIRED)
-find_program(JAR_EXECUTABLE jar REQUIRED)
-
-set(AGENT_JAVA_SOURCES
-    agent/java/keystork/Agent.java
-    agent/java/keystork/Blank.java
-    agent/java/keystork/Loader.java
-    agent/java/keystork/Shell.java)
+set(APK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/agent/apk")
 set(DEX_DIR "${CMAKE_CURRENT_BINARY_DIR}/gen/dex")
 set(AGENT_DEX "${DEX_DIR}/classes.dex")
 
-# javac then jar then d8, rather than handing d8 the class files directly: a
-# source file can produce any number of them once there are nested or
-# anonymous classes, and only the jar collects those without CMake having to
-# predict their names.
-#
-# -source/-target rather than --release, which javac refuses alongside the
-# android.jar bootclasspath this needs. 17 is well inside what d8 accepts
-# whatever JDK happens to be installed.
+# CONFIGURE_DEPENDS so that adding a class re-runs the glob rather than being
+# silently left out of the build.
+file(GLOB_RECURSE AGENT_JAVA_SOURCES CONFIGURE_DEPENDS "${APK_DIR}/src/main/java/*.java")
+
+# Gradle decides for itself what is up to date, so this always runs; it is a
+# couple of seconds when there is nothing to do. The dex is only rewritten when
+# it has actually changed, which is what keeps the .incbin and the link from
+# redoing themselves every build.
 add_custom_command(
     OUTPUT "${AGENT_DEX}"
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${DEX_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DEX_DIR}/classes"
-    COMMAND "${JAVAC_EXECUTABLE}" -source 17 -target 17 -Xlint:-options -nowarn
-            -classpath "${ANDROID_JAR}" -d "${DEX_DIR}/classes" ${AGENT_JAVA_SOURCES}
-    COMMAND "${JAR_EXECUTABLE}" --create --file "${DEX_DIR}/classes.jar"
-            -C "${DEX_DIR}/classes" .
-    COMMAND "${D8_EXECUTABLE}" --min-api ${ANDROID_PLATFORM_LEVEL}
-            --output "${DEX_DIR}" "${DEX_DIR}/classes.jar"
+    COMMAND "${CMAKE_COMMAND}" -E env "ANDROID_HOME=${KEYSTORK_ANDROID_SDK}"
+            "${APK_DIR}/gradlew" --project-dir "${APK_DIR}" --quiet assembleRelease
+    COMMAND "${CMAKE_COMMAND}" "-DAPK_DIR=${APK_DIR}" "-DOUTPUT=${AGENT_DEX}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_dex.cmake"
     DEPENDS ${AGENT_JAVA_SOURCES}
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    COMMENT "compiling the agent's dex against ${KEYSTORK_PLATFORM}"
+            "${APK_DIR}/build.gradle.kts"
+            "${APK_DIR}/settings.gradle.kts"
+            "${APK_DIR}/src/main/AndroidManifest.xml"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_dex.cmake"
+    COMMENT "building the agent's APK and taking its dex"
     VERBATIM)
 
 set(DEX_BLOB "${CMAKE_CURRENT_BINARY_DIR}/gen/dex_blob.S")

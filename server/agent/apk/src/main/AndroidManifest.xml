@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Never read at runtime. The framework learns about these classes because the
+  agent writes them into the app's bind data and answers for them through
+  keystork.Loader; this file exists so the build is an ordinary app build, and
+  so that what each class is for is written down somewhere a person will look.
+
+  The permissions are the target app's problem, not ours: the process runs
+  under its manifest, so an app without INTERNET cannot be made to reach the
+  integrity service by anything declared here.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application android:name="keystork.Shell">
+        <activity
+            android:name="keystork.Blank"
+            android:exported="true" />
+    </application>
+
+</manifest>
