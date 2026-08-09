@@ -1,0 +1,164 @@
+// keystork wire protocol.
+//
+// Framing: every message below is written as a 4-byte big-endian length
+// followed by that many bytes of serialized protobuf. A connection is a
+// UID-scoped session:
+//
+//   client -> Handshake       (mandatory first message)
+//   server -> HandshakeAck
+//   client -> Request         \  repeated, strictly synchronous,
+//   server -> Response        /  one in flight at a time
+//
+// A Request before a successful handshake is a protocol error.
+//
+// Modeling rules (see design_docs/keystore-over-ip-design.md §4):
+//   - The wire speaks KeyMint's raw integers. Enums from keystore2/KeyMint are
+//     carried as int32 and named by the Python client, so new enum values need
+//     no schema or server change.
+//   - All key material and certificates are raw DER bytes. No PEM, no base64.
+
+syntax = "proto3";
+
+package keystork.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+// Bumped only for incompatible changes to framing or the handshake.
+// Handshake.protocol_version must equal this.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_1 = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+message Error {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+
+    // keystore2 returned a service-specific Binder exception. `code` is
+    // positive for a keystore2 ResponseCode and negative for an embedded
+    // KeyMint ErrorCode; the sign disambiguates the two error spaces.
+    SERVICE_SPECIFIC = 1;
+
+    // The Binder transaction itself failed (dead node, UNKNOWN_TRANSACTION,
+    // security exception, ...). `code` is a binder_status_t and
+    // `exception_code` is a binder_exception_t.
+    TRANSACTION = 2;
+
+    // The client violated the protocol: bad framing, oversized message,
+    // unparseable body, request before handshake, unsupported protocol
+    // version, or an RPC this server build does not implement.
+    PROTOCOL = 3;
+
+    // Session setup failed before any keystore2 call: bad UID, setresgid /
+    // setresuid failure, or the keystore2 service could not be reached.
+    // Only ever carried in a HandshakeAck. `code` is an errno where one
+    // applies, otherwise 0.
+    IDENTITY = 4;
+  }
+
+  Kind kind = 1;
+
+  // SERVICE_SPECIFIC: keystore2 ResponseCode (> 0) or KeyMint ErrorCode (< 0).
+  // TRANSACTION:      binder_status_t.
+  // PROTOCOL:         0.
+  // IDENTITY:         errno, or 0 if none applies.
+  int32 code = 2;
+
+  // Human-readable detail. Diagnostic only; never parsed by the client.
+  string message = 3;
+
+  // TRANSACTION only: the binder_exception_t, kept separate from `code`
+  // because the two spaces overlap numerically (EX_SECURITY == -1 and
+  // STATUS_PERMISSION_DENIED == -1 are unrelated).
+  int32 exception_code = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+message Handshake {
+  // Must be PROTOCOL_VERSION_1.
+  uint32 protocol_version = 1;
+
+  // The UID this session acts as. The child permanently drops to it before
+  // opening Binder and can never return to root, which is why the UID is a
+  // per-connection property rather than a per-request one. The primary GID is
+  // set to this same value.
+  uint32 uid = 2;
+}
+
+message HandshakeAck {
+  // Unset on success. When set, the session is over: the server closes the
+  // connection immediately after writing this message.
+  Error error = 1;
+
+  uint32 protocol_version = 2;
+
+  // What the device's keystore2 reports from getInterfaceVersion(). The
+  // client owns the capability table keyed off this number, so it can say
+  // "this device is V3, that call needs V5" rather than surfacing a bare
+  // UNKNOWN_TRANSACTION. Only meaningful when `error` is unset.
+  int32 keystore_interface_version = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+// android.system.keystore2.KeyDescriptor. Carries the full tuple and exposes
+// every Domain value, not just the app-scoped common case.
+message KeyDescriptor {
+  // keystore2 Domain: APP=0, GRANT=1, SELINUX=2, BLOB=3, KEY_ID=4.
+  int32 domain = 1;
+  int64 nspace = 2;
+  optional string alias = 3;
+  optional bytes blob = 4;
+}
+
+// ---------------------------------------------------------------------------
+// list
+// ---------------------------------------------------------------------------
+
+message ListRequest {
+  int32 domain = 1;
+  int64 nspace = 2;
+
+  // false -> IKeystoreService.listEntries (deprecated, available since V1)
+  // true  -> IKeystoreService.listEntriesBatched (requires interface V3)
+  //
+  // The server does not choose. The client owns the capability table and the
+  // pagination loop; each ListRequest is exactly one keystore2 call.
+  bool batched = 3;
+
+  // batched only: resume strictly after this alias. Unset starts at the
+  // beginning.
+  optional string starting_past_alias = 4;
+}
+
+message ListResponse {
+  // One batch, in the order keystore2 returned it. For a batched call an
+  // empty list means the end of the enumeration.
+  repeated KeyDescriptor entries = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Envelopes
+// ---------------------------------------------------------------------------
+
+message Request {
+  oneof body {
+    ListRequest list = 1;
+  }
+}
+
+message Response {
+  oneof body {
+    Error error = 1;
+    ListResponse list = 2;
+  }
+}

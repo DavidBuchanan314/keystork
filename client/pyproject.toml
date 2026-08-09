@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keystork"
+version = "0.1.0"
+description = "Drive a remote Android device's keystore2 over IP"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "../LICENSE" }
+dependencies = [
+    # Generated with protoc 3.19.6; the generated module asserts on a runtime
+    # older than its generator.
+    "protobuf>=3.19",
+]
+
+[project.optional-dependencies]
+# Not needed by `list`. Pulled in by the attestation and certificate handling
+# that lands with get_key_entry.
+crypto = ["cryptography>=41"]
+
+[project.scripts]
+keystork = "keystork.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["keystork*"]

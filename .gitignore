@@ -73,3 +73,8 @@ aosp/
 
 # Slop containment
 AGENTS.md
+
+# Python stuff
+__pycache__/
+*.py[codz]
+*$py.class
