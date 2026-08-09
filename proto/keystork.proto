@@ -10,7 +10,7 @@
 //   client -> Command      \  repeated, strictly synchronous,
 //   server -> CommandResponse /  one in flight at a time
 //
-// Two commands hand the connection over to a subprotocol and never give it
+// Three commands hand the connection over to a subprotocol and never give it
 // back. open_keystore_session drops to the session's UID -- the connection
 // becomes a keystore session, strictly synchronous like the top level:
 //
@@ -24,11 +24,24 @@
 //   client -> ExecInput   (stdin, resize, signal; any time, any number)
 //   server -> ExecEvent   (output, exit; any time, any number)
 //
-// There is no way back from either, and no second session on the same
-// connection: the UID drop cannot be undone, and a connection carrying a
-// process's stdio has nothing left to say a command in. Reading files is a
-// top-level command precisely because it always runs as root, which is only
-// true before that point.
+// open_integrity_session launches an app, takes its own code off every
+// classpath in the process and puts ours there instead -- the connection
+// becomes a conversation with that app, strictly synchronous:
+//
+//   client -> IntegrityRequest   \
+//   server -> IntegrityResponse  /
+//
+// The daemon does not read either of those. It holds a socket to the app that
+// nothing else on the device can reach and copies bytes between the two, so
+// the messages below are a contract between the Python client and the Java in
+// the app, and the daemon needs no change to serve a new one.
+//
+// There is no way back from any of them, and no second session on the same
+// connection: the UID drop cannot be undone, a connection carrying a process's
+// stdio has nothing left to say a command in, and the app lives exactly as
+// long as the connection that launched it. Reading files is a top-level
+// command precisely because it always runs as root, which is only true before
+// that point.
 //
 // Modeling rules (see design_docs/keystore-over-ip-design.md §4):
 //   - The wire speaks KeyMint's raw integers. Enums from keystore2/KeyMint are
@@ -41,6 +54,11 @@ syntax = "proto3";
 package keystork.v1;
 
 option optimize_for = LITE_RUNTIME;
+
+// The app's half of the integrity subprotocol parses these too, so the Java is
+// generated from this file as well. One class per message rather than one
+// outer class holding all of them.
+option java_multiple_files = true;
 
 // Bumped only for incompatible changes to framing or the handshake.
 // Greeting.protocol_version must equal this.
@@ -77,6 +95,11 @@ message Error {
     // be exec'd, an unreachable keystore2 service. `code` is an errno where
     // one applies, otherwise 0.
     IDENTITY = 4;
+
+    // The Play Integrity API refused, from inside the app. `code` is its own
+    // IntegrityErrorCode, kept as the number it is and named by the client,
+    // exactly as KeyMint's are.
+    INTEGRITY = 5;
   }
 
   Kind kind = 1;
@@ -85,6 +108,7 @@ message Error {
   // TRANSACTION:      binder_status_t.
   // PROTOCOL:         0.
   // IDENTITY:         errno, or 0 if none applies.
+  // INTEGRITY:        IntegrityErrorCode, or 0 if the failure had no code.
   int32 code = 2;
 
   // Human-readable detail. Diagnostic only; never parsed by the client.
@@ -116,7 +140,7 @@ message Command {
     KillServerRequest kill_server = 2;
     OpenKeystoreSessionRequest open_keystore_session = 3;
     ExecRequest exec = 4;
-    InjectRequest inject = 5;
+    OpenIntegritySessionRequest open_integrity_session = 5;
   }
 }
 
@@ -127,23 +151,24 @@ message CommandResponse {
     KillServerResponse kill_server = 3;
     KeystoreSessionOpened open_keystore_session = 4;
     ExecStarted exec = 5;
-    InjectResponse inject = 6;
+    IntegritySessionOpened open_integrity_session = 6;
   }
 }
 
-// Launches `package` and loads the daemon's embedded agent into it before any
-// of the app's own code has run.
+// Launches `package`, takes its own code off every classpath in its process
+// before a line of it has run, and hands the connection over to the app.
 //
 // Unlike everything else at this level this takes seconds rather than a round
 // trip, because it has to catch a zygote fork: the daemon force-stops the
 // package, seizes the zygote with PTRACE_O_TRACEFORK, launches the app, and
 // steps the forked child until it drops to `uid`. Progress goes to logcat --
-// `logcat -s keystorkd` -- since there is nowhere else for it to go in a
-// single request/response.
+// `logcat -s keystorkd` -- since there is nowhere else for it to go before the
+// response.
 //
-// This is not a session. When there is state worth holding open -- a warm
-// token provider for Standard-mode integrity -- it becomes one.
-message InjectRequest {
+// It is a session because there is state worth holding open: the Standard
+// integrity API's token provider takes seconds to prepare and is reusable, so
+// it lives in the app for as long as this connection does.
+message OpenIntegritySessionRequest {
   // Resolved to a component and launched. The daemon has no notion of
   // packages beyond handing this to `am`.
   string package = 1;
@@ -160,49 +185,83 @@ message InjectRequest {
   optional uint32 timeout_ms = 3;
 }
 
-message InjectResponse {
+// Sent once the app is up and answering. Everything here is diagnostic: the
+// session is open whatever the numbers say, and anything that went wrong
+// arrives as an Error instead.
+message IntegritySessionOpened {
   // The app process that was caught, and the UID it had become.
   int32 pid = 1;
   uint32 uid = 2;
 
-  // What became of the dlopen. Not an error/success pair: an agent whose
-  // constructor calls _exit never lets dlopen return, so EXITED is the
-  // ordinary outcome rather than a failure, and the three have to be told
-  // apart rather than collapsed.
-  enum Outcome {
-    OUTCOME_UNSPECIFIED = 0;
+  // What the stepping cost, in syscalls: to the runtime landmark where the
+  // agent can first touch a VM, and from there to the app's bind message.
+  uint32 arm_steps = 3;
+  uint32 bind_steps = 4;
+}
 
-    // dlopen returned; `handle` is what it gave back. Zero means the linker
-    // refused the library, and the daemon logged its reason.
-    RETURNED = 1;
+// ---------------------------------------------------------------------------
+// Integrity subprotocol
+//
+// A conversation with the Java running inside the app, relayed verbatim: the
+// daemon copies these bytes between the client and a socket only it and the
+// app can reach, and parses none of them.
+//
+// Both token flavours are here because they are different APIs, not different
+// options: classic is one call and one token, standard needs a provider
+// prepared once and then issues cheaply and repeatedly.
+// ---------------------------------------------------------------------------
 
-    // The process died inside dlopen. `exit_status` is the raw wait status.
-    EXITED = 2;
-
-    // Something faulted that was not the return trap -- the agent's
-    // constructor crashing, most likely.
-    FAULTED = 3;
+message IntegrityRequest {
+  oneof body {
+    ClassicTokenRequest classic = 1;
+    PrepareStandardRequest prepare_standard = 2;
+    StandardTokenRequest standard = 3;
   }
+}
 
-  Outcome outcome = 3;
-  uint64 handle = 4;
-  int32 exit_status = 5;
-  int32 fault_signal = 6;
-  uint64 fault_address = 7;
+message IntegrityResponse {
+  oneof body {
+    Error error = 1;
+    TokenIssued token = 2;
+    StandardPrepared prepare_standard = 3;
+  }
+}
 
-  // The second stage: once the runtime has settled the daemon steps the
-  // target to a landmark and calls the agent's keystork_arm, still with the
-  // process stopped. What that returned, and how many syscalls it took to
-  // reach the landmark -- the latter being the cost of the stepping.
-  optional int32 arm_result = 8;
-  optional uint32 arm_steps = 9;
+// One token, one call. `nonce` is passed to the API exactly as given: it must
+// be URL-safe base64 without padding or wrapping, and 16..500 bytes once
+// decoded. The client builds that string, because the client is where the
+// caller's bytes are.
+message ClassicTokenRequest {
+  string nonce = 1;
 
-  // The third stage: the daemon lets the main thread run up to the message
-  // carrying the app's bind data and, before it is dispatched, has the agent
-  // take the app's own code off every classpath in the process. What that
-  // returned, and how many further syscalls the stepping cost.
-  optional int32 bind_result = 10;
-  optional uint32 bind_steps = 11;
+  // Only needed for an app Play does not know. Unset means the app's own
+  // linked project, which is the ordinary case.
+  optional int64 cloud_project_number = 2;
+}
+
+// Prepares the Standard-mode token provider, which is the expensive half and
+// is done once per session. The app keeps what this returns.
+message PrepareStandardRequest {
+  int64 cloud_project_number = 1;
+}
+
+message StandardPrepared {}
+
+// Issues from the prepared provider. `request_hash` is bound into the token
+// and is the caller's to choose -- typically a digest of whatever the token is
+// vouching for.
+message StandardTokenRequest {
+  string request_hash = 1;
+}
+
+message TokenIssued {
+  // The token as the API returned it. For classic this is a JWE whose verdicts
+  // only Play can decrypt; nothing here looks inside it.
+  string token = 1;
+
+  // How long the app spent waiting on the API, which is almost all of the
+  // round trip and worth seeing separately from it.
+  uint32 took_ms = 2;
 }
 
 // Reads part of a file, always as root -- which is why this is a top-level

@@ -15,7 +15,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ekeystork.proto\x12\x0bkeystork.v1\"\xc6\x01\n\x05\x45rror\x12%\n\x04kind\x18\x01 \x01(\x0e\x32\x17.keystork.v1.Error.Kind\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x16\n\x0e\x65xception_code\x18\x04 \x01(\x05\"_\n\x04Kind\x12\x14\n\x10KIND_UNSPECIFIED\x10\x00\x12\x14\n\x10SERVICE_SPECIFIC\x10\x01\x12\x0f\n\x0bTRANSACTION\x10\x02\x12\x0c\n\x08PROTOCOL\x10\x03\x12\x0c\n\x08IDENTITY\x10\x04\"$\n\x08Greeting\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\"\x9d\x02\n\x07\x43ommand\x12\x31\n\tread_file\x18\x01 \x01(\x0b\x32\x1c.keystork.v1.ReadFileRequestH\x00\x12\x35\n\x0bkill_server\x18\x02 \x01(\x0b\x32\x1e.keystork.v1.KillServerRequestH\x00\x12H\n\x15open_keystore_session\x18\x03 \x01(\x0b\x32\'.keystork.v1.OpenKeystoreSessionRequestH\x00\x12(\n\x04\x65xec\x18\x04 \x01(\x0b\x32\x18.keystork.v1.ExecRequestH\x00\x12,\n\x06inject\x18\x05 \x01(\x0b\x32\x1a.keystork.v1.InjectRequestH\x00\x42\x06\n\x04\x62ody\"\xc8\x02\n\x0f\x43ommandResponse\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12\x32\n\tread_file\x18\x02 \x01(\x0b\x32\x1d.keystork.v1.ReadFileResponseH\x00\x12\x36\n\x0bkill_server\x18\x03 \x01(\x0b\x32\x1f.keystork.v1.KillServerResponseH\x00\x12\x43\n\x15open_keystore_session\x18\x04 \x01(\x0b\x32\".keystork.v1.KeystoreSessionOpenedH\x00\x12(\n\x04\x65xec\x18\x05 \x01(\x0b\x32\x18.keystork.v1.ExecStartedH\x00\x12-\n\x06inject\x18\x06 \x01(\x0b\x32\x1b.keystork.v1.InjectResponseH\x00\x42\x06\n\x04\x62ody\"U\n\rInjectRequest\x12\x0f\n\x07package\x18\x01 \x01(\t\x12\x0b\n\x03uid\x18\x02 \x01(\r\x12\x17\n\ntimeout_ms\x18\x03 \x01(\rH\x00\x88\x01\x01\x42\r\n\x0b_timeout_ms\"\x9d\x03\n\x0eInjectResponse\x12\x0b\n\x03pid\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\r\x12\x34\n\x07outcome\x18\x03 \x01(\x0e\x32#.keystork.v1.InjectResponse.Outcome\x12\x0e\n\x06handle\x18\x04 \x01(\x04\x12\x13\n\x0b\x65xit_status\x18\x05 \x01(\x05\x12\x14\n\x0c\x66\x61ult_signal\x18\x06 \x01(\x05\x12\x15\n\rfault_address\x18\x07 \x01(\x04\x12\x17\n\narm_result\x18\x08 \x01(\x05H\x00\x88\x01\x01\x12\x16\n\tarm_steps\x18\t \x01(\rH\x01\x88\x01\x01\x12\x18\n\x0b\x62ind_result\x18\n \x01(\x05H\x02\x88\x01\x01\x12\x17\n\nbind_steps\x18\x0b \x01(\rH\x03\x88\x01\x01\"I\n\x07Outcome\x12\x17\n\x13OUTCOME_UNSPECIFIED\x10\x00\x12\x0c\n\x08RETURNED\x10\x01\x12\n\n\x06\x45XITED\x10\x02\x12\x0b\n\x07\x46\x41ULTED\x10\x03\x42\r\n\x0b_arm_resultB\x0c\n\n_arm_stepsB\x0e\n\x0c_bind_resultB\r\n\x0b_bind_steps\"C\n\x0fReadFileRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0e\n\x06offset\x18\x02 \x01(\x04\x12\x12\n\nmax_length\x18\x03 \x01(\r\"-\n\x10ReadFileResponse\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x0b\n\x03\x65of\x18\x02 \x01(\x08\"\x13\n\x11KillServerRequest\"\x14\n\x12KillServerResponse\")\n\x1aOpenKeystoreSessionRequest\x12\x0b\n\x03uid\x18\x01 \x01(\r\";\n\x15KeystoreSessionOpened\x12\"\n\x1akeystore_interface_version\x18\x01 \x01(\x05\"\xda\x01\n\x0b\x45xecRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgv\x18\x02 \x03(\t\x12\x0b\n\x03\x65nv\x18\x03 \x03(\t\x12\x11\n\tclear_env\x18\x04 \x01(\x08\x12\x10\n\x03\x63wd\x18\x05 \x01(\tH\x00\x88\x01\x01\x12\x10\n\x03uid\x18\x06 \x01(\rH\x01\x88\x01\x01\x12\x10\n\x03gid\x18\x07 \x01(\rH\x02\x88\x01\x01\x12\x0e\n\x06groups\x18\x08 \x03(\r\x12)\n\x03pty\x18\t \x01(\x0b\x32\x17.keystork.v1.WindowSizeH\x03\x88\x01\x01\x42\x06\n\x04_cwdB\x06\n\x04_uidB\x06\n\x04_gidB\x06\n\x04_pty\"(\n\nWindowSize\x12\x0c\n\x04rows\x18\x01 \x01(\r\x12\x0c\n\x04\x63ols\x18\x02 \x01(\r\"\'\n\x0b\x45xecStarted\x12\x0b\n\x03pid\x18\x01 \x01(\x05\x12\x0b\n\x03pty\x18\x02 \x01(\x08\"\x96\x01\n\tExecInput\x12\x14\n\nstdin_data\x18\x01 \x01(\x0cH\x00\x12.\n\tstdin_eof\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ExecStdinEofH\x00\x12)\n\x06resize\x18\x03 \x01(\x0b\x32\x17.keystork.v1.WindowSizeH\x00\x12\x10\n\x06signal\x18\x04 \x01(\rH\x00\x42\x06\n\x04\x62ody\"\x0e\n\x0c\x45xecStdinEof\"\x8a\x01\n\tExecEvent\x12)\n\x06output\x18\x01 \x01(\x0b\x32\x17.keystork.v1.ExecOutputH\x00\x12%\n\x04\x65xit\x18\x02 \x01(\x0b\x32\x15.keystork.v1.ExecExitH\x00\x12#\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x42\x06\n\x04\x62ody\"z\n\nExecOutput\x12.\n\x06stream\x18\x01 \x01(\x0e\x32\x1e.keystork.v1.ExecOutput.Stream\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\".\n\x06Stream\x12\x11\n\rSTREAM_STDOUT\x10\x00\x12\x11\n\rSTREAM_STDERR\x10\x01\"@\n\x08\x45xecExit\x12\x13\n\texit_code\x18\x01 \x01(\rH\x00\x12\x15\n\x0bterm_signal\x18\x02 \x01(\rH\x00\x42\x08\n\x06status\"i\n\rKeyDescriptor\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x12\n\x05\x61lias\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x11\n\x04\x62lob\x18\x04 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_aliasB\x07\n\x05_blob\"u\n\x0cKeyParameter\x12\x0b\n\x03tag\x18\x01 \x01(\x05\x12\x14\n\nbool_value\x18\x02 \x01(\x08H\x00\x12\x11\n\x07integer\x18\x03 \x01(\rH\x00\x12\x16\n\x0clong_integer\x18\x04 \x01(\x04H\x00\x12\x0e\n\x04\x62lob\x18\x05 \x01(\x0cH\x00\x42\x07\n\x05value\"x\n\x0bListRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x0f\n\x07\x62\x61tched\x18\x03 \x01(\x08\x12 \n\x13starting_past_alias\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x16\n\x14_starting_past_alias\";\n\x0cListResponse\x12+\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"U\n\rAuthorization\x12\x16\n\x0esecurity_level\x18\x01 \x01(\x05\x12,\n\tparameter\x18\x02 \x01(\x0b\x32\x19.keystork.v1.KeyParameter\"\x84\x02\n\x0bKeyMetadata\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12\x1a\n\x12key_security_level\x18\x02 \x01(\x05\x12\x32\n\x0e\x61uthorizations\x18\x03 \x03(\x0b\x32\x1a.keystork.v1.Authorization\x12\x18\n\x0b\x63\x65rtificate\x18\x04 \x01(\x0cH\x00\x88\x01\x01\x12\x1e\n\x11\x63\x65rtificate_chain\x18\x05 \x01(\x0cH\x01\x88\x01\x01\x12\x1c\n\x14modification_time_ms\x18\x06 \x01(\x03\x42\x0e\n\x0c_certificateB\x14\n\x12_certificate_chain\"=\n\x12GetKeyEntryRequest\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"A\n\x13GetKeyEntryResponse\x12*\n\x08metadata\x18\x01 \x01(\x0b\x32\x18.keystork.v1.KeyMetadata\"\x90\x01\n\x0eOperationStart\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12-\n\nparameters\x18\x02 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12\x0e\n\x06\x66orced\x18\x03 \x01(\x08\x12\x16\n\x0esecurity_level\x18\x04 \x01(\x05\"\xa7\x01\n\x0eOperationBegun\x12-\n\nparameters\x18\x01 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12 \n\x13operation_challenge\x18\x02 \x01(\x03H\x00\x88\x01\x01\x12\x1a\n\rupgraded_blob\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x42\x16\n\x14_operation_challengeB\x10\n\x0e_upgraded_blob\"\x9f\x01\n\x13RunOperationRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\x12\x10\n\x03\x61\x61\x64\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x12\x12\n\x05input\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x12\x16\n\tsignature\x18\x04 \x01(\x0cH\x02\x88\x01\x01\x42\x06\n\x04_aadB\x08\n\x06_inputB\x0c\n\n_signature\"b\n\x14RunOperationResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\x12\x13\n\x06output\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"<\n\x0eOpBeginRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\"=\n\x0fOpBeginResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\"!\n\x12OpUpdateAadRequest\x12\x0b\n\x03\x61\x61\x64\x18\x01 \x01(\x0c\"\x15\n\x13OpUpdateAadResponse\" \n\x0fOpUpdateRequest\x12\r\n\x05input\x18\x01 \x01(\x0c\"2\n\x10OpUpdateResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"U\n\x0fOpFinishRequest\x12\x12\n\x05input\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x12\x16\n\tsignature\x18\x02 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_inputB\x0c\n\n_signature\"2\n\x10OpFinishResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"\x10\n\x0eOpAbortRequest\"\x11\n\x0fOpAbortResponse\"\xba\x03\n\x0fKeystoreRequest\x12(\n\x04list\x18\x01 \x01(\x0b\x32\x18.keystork.v1.ListRequestH\x00\x12\x38\n\rget_key_entry\x18\x08 \x01(\x0b\x32\x1f.keystork.v1.GetKeyEntryRequestH\x00\x12\x39\n\rrun_operation\x18\x02 \x01(\x0b\x32 .keystork.v1.RunOperationRequestH\x00\x12/\n\x08op_begin\x18\x03 \x01(\x0b\x32\x1b.keystork.v1.OpBeginRequestH\x00\x12\x38\n\rop_update_aad\x18\x04 \x01(\x0b\x32\x1f.keystork.v1.OpUpdateAadRequestH\x00\x12\x31\n\top_update\x18\x05 \x01(\x0b\x32\x1c.keystork.v1.OpUpdateRequestH\x00\x12\x31\n\top_finish\x18\x06 \x01(\x0b\x32\x1c.keystork.v1.OpFinishRequestH\x00\x12/\n\x08op_abort\x18\x07 \x01(\x0b\x32\x1b.keystork.v1.OpAbortRequestH\x00\x42\x06\n\x04\x62ody\"\xe8\x03\n\x10KeystoreResponse\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12)\n\x04list\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ListResponseH\x00\x12\x39\n\rget_key_entry\x18\t \x01(\x0b\x32 .keystork.v1.GetKeyEntryResponseH\x00\x12:\n\rrun_operation\x18\x03 \x01(\x0b\x32!.keystork.v1.RunOperationResponseH\x00\x12\x30\n\x08op_begin\x18\x04 \x01(\x0b\x32\x1c.keystork.v1.OpBeginResponseH\x00\x12\x39\n\rop_update_aad\x18\x05 \x01(\x0b\x32 .keystork.v1.OpUpdateAadResponseH\x00\x12\x32\n\top_update\x18\x06 \x01(\x0b\x32\x1d.keystork.v1.OpUpdateResponseH\x00\x12\x32\n\top_finish\x18\x07 \x01(\x0b\x32\x1d.keystork.v1.OpFinishResponseH\x00\x12\x30\n\x08op_abort\x18\x08 \x01(\x0b\x32\x1c.keystork.v1.OpAbortResponseH\x00\x42\x06\n\x04\x62ody*K\n\x0fProtocolVersion\x12 \n\x1cPROTOCOL_VERSION_UNSPECIFIED\x10\x00\x12\x16\n\x12PROTOCOL_VERSION_1\x10\x01\x42\x02H\x03\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ekeystork.proto\x12\x0bkeystork.v1\"\xd5\x01\n\x05\x45rror\x12%\n\x04kind\x18\x01 \x01(\x0e\x32\x17.keystork.v1.Error.Kind\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x16\n\x0e\x65xception_code\x18\x04 \x01(\x05\"n\n\x04Kind\x12\x14\n\x10KIND_UNSPECIFIED\x10\x00\x12\x14\n\x10SERVICE_SPECIFIC\x10\x01\x12\x0f\n\x0bTRANSACTION\x10\x02\x12\x0c\n\x08PROTOCOL\x10\x03\x12\x0c\n\x08IDENTITY\x10\x04\x12\r\n\tINTEGRITY\x10\x05\"$\n\x08Greeting\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\"\xbb\x02\n\x07\x43ommand\x12\x31\n\tread_file\x18\x01 \x01(\x0b\x32\x1c.keystork.v1.ReadFileRequestH\x00\x12\x35\n\x0bkill_server\x18\x02 \x01(\x0b\x32\x1e.keystork.v1.KillServerRequestH\x00\x12H\n\x15open_keystore_session\x18\x03 \x01(\x0b\x32\'.keystork.v1.OpenKeystoreSessionRequestH\x00\x12(\n\x04\x65xec\x18\x04 \x01(\x0b\x32\x18.keystork.v1.ExecRequestH\x00\x12J\n\x16open_integrity_session\x18\x05 \x01(\x0b\x32(.keystork.v1.OpenIntegritySessionRequestH\x00\x42\x06\n\x04\x62ody\"\xe0\x02\n\x0f\x43ommandResponse\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12\x32\n\tread_file\x18\x02 \x01(\x0b\x32\x1d.keystork.v1.ReadFileResponseH\x00\x12\x36\n\x0bkill_server\x18\x03 \x01(\x0b\x32\x1f.keystork.v1.KillServerResponseH\x00\x12\x43\n\x15open_keystore_session\x18\x04 \x01(\x0b\x32\".keystork.v1.KeystoreSessionOpenedH\x00\x12(\n\x04\x65xec\x18\x05 \x01(\x0b\x32\x18.keystork.v1.ExecStartedH\x00\x12\x45\n\x16open_integrity_session\x18\x06 \x01(\x0b\x32#.keystork.v1.IntegritySessionOpenedH\x00\x42\x06\n\x04\x62ody\"c\n\x1bOpenIntegritySessionRequest\x12\x0f\n\x07package\x18\x01 \x01(\t\x12\x0b\n\x03uid\x18\x02 \x01(\r\x12\x17\n\ntimeout_ms\x18\x03 \x01(\rH\x00\x88\x01\x01\x42\r\n\x0b_timeout_ms\"Y\n\x16IntegritySessionOpened\x12\x0b\n\x03pid\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\r\x12\x11\n\tarm_steps\x18\x03 \x01(\r\x12\x12\n\nbind_steps\x18\x04 \x01(\r\"\xc7\x01\n\x10IntegrityRequest\x12\x33\n\x07\x63lassic\x18\x01 \x01(\x0b\x32 .keystork.v1.ClassicTokenRequestH\x00\x12?\n\x10prepare_standard\x18\x02 \x01(\x0b\x32#.keystork.v1.PrepareStandardRequestH\x00\x12\x35\n\x08standard\x18\x03 \x01(\x0b\x32!.keystork.v1.StandardTokenRequestH\x00\x42\x06\n\x04\x62ody\"\xa6\x01\n\x11IntegrityResponse\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12)\n\x05token\x18\x02 \x01(\x0b\x32\x18.keystork.v1.TokenIssuedH\x00\x12\x39\n\x10prepare_standard\x18\x03 \x01(\x0b\x32\x1d.keystork.v1.StandardPreparedH\x00\x42\x06\n\x04\x62ody\"`\n\x13\x43lassicTokenRequest\x12\r\n\x05nonce\x18\x01 \x01(\t\x12!\n\x14\x63loud_project_number\x18\x02 \x01(\x03H\x00\x88\x01\x01\x42\x17\n\x15_cloud_project_number\"6\n\x16PrepareStandardRequest\x12\x1c\n\x14\x63loud_project_number\x18\x01 \x01(\x03\"\x12\n\x10StandardPrepared\",\n\x14StandardTokenRequest\x12\x14\n\x0crequest_hash\x18\x01 \x01(\t\"-\n\x0bTokenIssued\x12\r\n\x05token\x18\x01 \x01(\t\x12\x0f\n\x07took_ms\x18\x02 \x01(\r\"C\n\x0fReadFileRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0e\n\x06offset\x18\x02 \x01(\x04\x12\x12\n\nmax_length\x18\x03 \x01(\r\"-\n\x10ReadFileResponse\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x0b\n\x03\x65of\x18\x02 \x01(\x08\"\x13\n\x11KillServerRequest\"\x14\n\x12KillServerResponse\")\n\x1aOpenKeystoreSessionRequest\x12\x0b\n\x03uid\x18\x01 \x01(\r\";\n\x15KeystoreSessionOpened\x12\"\n\x1akeystore_interface_version\x18\x01 \x01(\x05\"\xda\x01\n\x0b\x45xecRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgv\x18\x02 \x03(\t\x12\x0b\n\x03\x65nv\x18\x03 \x03(\t\x12\x11\n\tclear_env\x18\x04 \x01(\x08\x12\x10\n\x03\x63wd\x18\x05 \x01(\tH\x00\x88\x01\x01\x12\x10\n\x03uid\x18\x06 \x01(\rH\x01\x88\x01\x01\x12\x10\n\x03gid\x18\x07 \x01(\rH\x02\x88\x01\x01\x12\x0e\n\x06groups\x18\x08 \x03(\r\x12)\n\x03pty\x18\t \x01(\x0b\x32\x17.keystork.v1.WindowSizeH\x03\x88\x01\x01\x42\x06\n\x04_cwdB\x06\n\x04_uidB\x06\n\x04_gidB\x06\n\x04_pty\"(\n\nWindowSize\x12\x0c\n\x04rows\x18\x01 \x01(\r\x12\x0c\n\x04\x63ols\x18\x02 \x01(\r\"\'\n\x0b\x45xecStarted\x12\x0b\n\x03pid\x18\x01 \x01(\x05\x12\x0b\n\x03pty\x18\x02 \x01(\x08\"\x96\x01\n\tExecInput\x12\x14\n\nstdin_data\x18\x01 \x01(\x0cH\x00\x12.\n\tstdin_eof\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ExecStdinEofH\x00\x12)\n\x06resize\x18\x03 \x01(\x0b\x32\x17.keystork.v1.WindowSizeH\x00\x12\x10\n\x06signal\x18\x04 \x01(\rH\x00\x42\x06\n\x04\x62ody\"\x0e\n\x0c\x45xecStdinEof\"\x8a\x01\n\tExecEvent\x12)\n\x06output\x18\x01 \x01(\x0b\x32\x17.keystork.v1.ExecOutputH\x00\x12%\n\x04\x65xit\x18\x02 \x01(\x0b\x32\x15.keystork.v1.ExecExitH\x00\x12#\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x42\x06\n\x04\x62ody\"z\n\nExecOutput\x12.\n\x06stream\x18\x01 \x01(\x0e\x32\x1e.keystork.v1.ExecOutput.Stream\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\".\n\x06Stream\x12\x11\n\rSTREAM_STDOUT\x10\x00\x12\x11\n\rSTREAM_STDERR\x10\x01\"@\n\x08\x45xecExit\x12\x13\n\texit_code\x18\x01 \x01(\rH\x00\x12\x15\n\x0bterm_signal\x18\x02 \x01(\rH\x00\x42\x08\n\x06status\"i\n\rKeyDescriptor\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x12\n\x05\x61lias\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x11\n\x04\x62lob\x18\x04 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_aliasB\x07\n\x05_blob\"u\n\x0cKeyParameter\x12\x0b\n\x03tag\x18\x01 \x01(\x05\x12\x14\n\nbool_value\x18\x02 \x01(\x08H\x00\x12\x11\n\x07integer\x18\x03 \x01(\rH\x00\x12\x16\n\x0clong_integer\x18\x04 \x01(\x04H\x00\x12\x0e\n\x04\x62lob\x18\x05 \x01(\x0cH\x00\x42\x07\n\x05value\"x\n\x0bListRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x0f\n\x07\x62\x61tched\x18\x03 \x01(\x08\x12 \n\x13starting_past_alias\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x16\n\x14_starting_past_alias\";\n\x0cListResponse\x12+\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"U\n\rAuthorization\x12\x16\n\x0esecurity_level\x18\x01 \x01(\x05\x12,\n\tparameter\x18\x02 \x01(\x0b\x32\x19.keystork.v1.KeyParameter\"\x84\x02\n\x0bKeyMetadata\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12\x1a\n\x12key_security_level\x18\x02 \x01(\x05\x12\x32\n\x0e\x61uthorizations\x18\x03 \x03(\x0b\x32\x1a.keystork.v1.Authorization\x12\x18\n\x0b\x63\x65rtificate\x18\x04 \x01(\x0cH\x00\x88\x01\x01\x12\x1e\n\x11\x63\x65rtificate_chain\x18\x05 \x01(\x0cH\x01\x88\x01\x01\x12\x1c\n\x14modification_time_ms\x18\x06 \x01(\x03\x42\x0e\n\x0c_certificateB\x14\n\x12_certificate_chain\"=\n\x12GetKeyEntryRequest\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"A\n\x13GetKeyEntryResponse\x12*\n\x08metadata\x18\x01 \x01(\x0b\x32\x18.keystork.v1.KeyMetadata\"\x90\x01\n\x0eOperationStart\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12-\n\nparameters\x18\x02 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12\x0e\n\x06\x66orced\x18\x03 \x01(\x08\x12\x16\n\x0esecurity_level\x18\x04 \x01(\x05\"\xa7\x01\n\x0eOperationBegun\x12-\n\nparameters\x18\x01 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12 \n\x13operation_challenge\x18\x02 \x01(\x03H\x00\x88\x01\x01\x12\x1a\n\rupgraded_blob\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x42\x16\n\x14_operation_challengeB\x10\n\x0e_upgraded_blob\"\x9f\x01\n\x13RunOperationRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\x12\x10\n\x03\x61\x61\x64\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x12\x12\n\x05input\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x12\x16\n\tsignature\x18\x04 \x01(\x0cH\x02\x88\x01\x01\x42\x06\n\x04_aadB\x08\n\x06_inputB\x0c\n\n_signature\"b\n\x14RunOperationResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\x12\x13\n\x06output\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"<\n\x0eOpBeginRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\"=\n\x0fOpBeginResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\"!\n\x12OpUpdateAadRequest\x12\x0b\n\x03\x61\x61\x64\x18\x01 \x01(\x0c\"\x15\n\x13OpUpdateAadResponse\" \n\x0fOpUpdateRequest\x12\r\n\x05input\x18\x01 \x01(\x0c\"2\n\x10OpUpdateResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"U\n\x0fOpFinishRequest\x12\x12\n\x05input\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x12\x16\n\tsignature\x18\x02 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_inputB\x0c\n\n_signature\"2\n\x10OpFinishResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"\x10\n\x0eOpAbortRequest\"\x11\n\x0fOpAbortResponse\"\xba\x03\n\x0fKeystoreRequest\x12(\n\x04list\x18\x01 \x01(\x0b\x32\x18.keystork.v1.ListRequestH\x00\x12\x38\n\rget_key_entry\x18\x08 \x01(\x0b\x32\x1f.keystork.v1.GetKeyEntryRequestH\x00\x12\x39\n\rrun_operation\x18\x02 \x01(\x0b\x32 .keystork.v1.RunOperationRequestH\x00\x12/\n\x08op_begin\x18\x03 \x01(\x0b\x32\x1b.keystork.v1.OpBeginRequestH\x00\x12\x38\n\rop_update_aad\x18\x04 \x01(\x0b\x32\x1f.keystork.v1.OpUpdateAadRequestH\x00\x12\x31\n\top_update\x18\x05 \x01(\x0b\x32\x1c.keystork.v1.OpUpdateRequestH\x00\x12\x31\n\top_finish\x18\x06 \x01(\x0b\x32\x1c.keystork.v1.OpFinishRequestH\x00\x12/\n\x08op_abort\x18\x07 \x01(\x0b\x32\x1b.keystork.v1.OpAbortRequestH\x00\x42\x06\n\x04\x62ody\"\xe8\x03\n\x10KeystoreResponse\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12)\n\x04list\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ListResponseH\x00\x12\x39\n\rget_key_entry\x18\t \x01(\x0b\x32 .keystork.v1.GetKeyEntryResponseH\x00\x12:\n\rrun_operation\x18\x03 \x01(\x0b\x32!.keystork.v1.RunOperationResponseH\x00\x12\x30\n\x08op_begin\x18\x04 \x01(\x0b\x32\x1c.keystork.v1.OpBeginResponseH\x00\x12\x39\n\rop_update_aad\x18\x05 \x01(\x0b\x32 .keystork.v1.OpUpdateAadResponseH\x00\x12\x32\n\top_update\x18\x06 \x01(\x0b\x32\x1d.keystork.v1.OpUpdateResponseH\x00\x12\x32\n\top_finish\x18\x07 \x01(\x0b\x32\x1d.keystork.v1.OpFinishResponseH\x00\x12\x30\n\x08op_abort\x18\x08 \x01(\x0b\x32\x1c.keystork.v1.OpAbortResponseH\x00\x42\x06\n\x04\x62ody*K\n\x0fProtocolVersion\x12 \n\x1cPROTOCOL_VERSION_UNSPECIFIED\x10\x00\x12\x16\n\x12PROTOCOL_VERSION_1\x10\x01\x42\x04H\x03P\x01\x62\x06proto3')
 
 _PROTOCOLVERSION = DESCRIPTOR.enum_types_by_name['ProtocolVersion']
 ProtocolVersion = enum_type_wrapper.EnumTypeWrapper(_PROTOCOLVERSION)
@@ -27,8 +27,15 @@ _ERROR = DESCRIPTOR.message_types_by_name['Error']
 _GREETING = DESCRIPTOR.message_types_by_name['Greeting']
 _COMMAND = DESCRIPTOR.message_types_by_name['Command']
 _COMMANDRESPONSE = DESCRIPTOR.message_types_by_name['CommandResponse']
-_INJECTREQUEST = DESCRIPTOR.message_types_by_name['InjectRequest']
-_INJECTRESPONSE = DESCRIPTOR.message_types_by_name['InjectResponse']
+_OPENINTEGRITYSESSIONREQUEST = DESCRIPTOR.message_types_by_name['OpenIntegritySessionRequest']
+_INTEGRITYSESSIONOPENED = DESCRIPTOR.message_types_by_name['IntegritySessionOpened']
+_INTEGRITYREQUEST = DESCRIPTOR.message_types_by_name['IntegrityRequest']
+_INTEGRITYRESPONSE = DESCRIPTOR.message_types_by_name['IntegrityResponse']
+_CLASSICTOKENREQUEST = DESCRIPTOR.message_types_by_name['ClassicTokenRequest']
+_PREPARESTANDARDREQUEST = DESCRIPTOR.message_types_by_name['PrepareStandardRequest']
+_STANDARDPREPARED = DESCRIPTOR.message_types_by_name['StandardPrepared']
+_STANDARDTOKENREQUEST = DESCRIPTOR.message_types_by_name['StandardTokenRequest']
+_TOKENISSUED = DESCRIPTOR.message_types_by_name['TokenIssued']
 _READFILEREQUEST = DESCRIPTOR.message_types_by_name['ReadFileRequest']
 _READFILERESPONSE = DESCRIPTOR.message_types_by_name['ReadFileResponse']
 _KILLSERVERREQUEST = DESCRIPTOR.message_types_by_name['KillServerRequest']
@@ -68,7 +75,6 @@ _OPABORTRESPONSE = DESCRIPTOR.message_types_by_name['OpAbortResponse']
 _KEYSTOREREQUEST = DESCRIPTOR.message_types_by_name['KeystoreRequest']
 _KEYSTORERESPONSE = DESCRIPTOR.message_types_by_name['KeystoreResponse']
 _ERROR_KIND = _ERROR.enum_types_by_name['Kind']
-_INJECTRESPONSE_OUTCOME = _INJECTRESPONSE.enum_types_by_name['Outcome']
 _EXECOUTPUT_STREAM = _EXECOUTPUT.enum_types_by_name['Stream']
 Error = _reflection.GeneratedProtocolMessageType('Error', (_message.Message,), {
   'DESCRIPTOR' : _ERROR,
@@ -98,19 +104,68 @@ CommandResponse = _reflection.GeneratedProtocolMessageType('CommandResponse', (_
   })
 _sym_db.RegisterMessage(CommandResponse)
 
-InjectRequest = _reflection.GeneratedProtocolMessageType('InjectRequest', (_message.Message,), {
-  'DESCRIPTOR' : _INJECTREQUEST,
+OpenIntegritySessionRequest = _reflection.GeneratedProtocolMessageType('OpenIntegritySessionRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPENINTEGRITYSESSIONREQUEST,
   '__module__' : 'keystork_pb2'
-  # @@protoc_insertion_point(class_scope:keystork.v1.InjectRequest)
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpenIntegritySessionRequest)
   })
-_sym_db.RegisterMessage(InjectRequest)
+_sym_db.RegisterMessage(OpenIntegritySessionRequest)
 
-InjectResponse = _reflection.GeneratedProtocolMessageType('InjectResponse', (_message.Message,), {
-  'DESCRIPTOR' : _INJECTRESPONSE,
+IntegritySessionOpened = _reflection.GeneratedProtocolMessageType('IntegritySessionOpened', (_message.Message,), {
+  'DESCRIPTOR' : _INTEGRITYSESSIONOPENED,
   '__module__' : 'keystork_pb2'
-  # @@protoc_insertion_point(class_scope:keystork.v1.InjectResponse)
+  # @@protoc_insertion_point(class_scope:keystork.v1.IntegritySessionOpened)
   })
-_sym_db.RegisterMessage(InjectResponse)
+_sym_db.RegisterMessage(IntegritySessionOpened)
+
+IntegrityRequest = _reflection.GeneratedProtocolMessageType('IntegrityRequest', (_message.Message,), {
+  'DESCRIPTOR' : _INTEGRITYREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.IntegrityRequest)
+  })
+_sym_db.RegisterMessage(IntegrityRequest)
+
+IntegrityResponse = _reflection.GeneratedProtocolMessageType('IntegrityResponse', (_message.Message,), {
+  'DESCRIPTOR' : _INTEGRITYRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.IntegrityResponse)
+  })
+_sym_db.RegisterMessage(IntegrityResponse)
+
+ClassicTokenRequest = _reflection.GeneratedProtocolMessageType('ClassicTokenRequest', (_message.Message,), {
+  'DESCRIPTOR' : _CLASSICTOKENREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.ClassicTokenRequest)
+  })
+_sym_db.RegisterMessage(ClassicTokenRequest)
+
+PrepareStandardRequest = _reflection.GeneratedProtocolMessageType('PrepareStandardRequest', (_message.Message,), {
+  'DESCRIPTOR' : _PREPARESTANDARDREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.PrepareStandardRequest)
+  })
+_sym_db.RegisterMessage(PrepareStandardRequest)
+
+StandardPrepared = _reflection.GeneratedProtocolMessageType('StandardPrepared', (_message.Message,), {
+  'DESCRIPTOR' : _STANDARDPREPARED,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.StandardPrepared)
+  })
+_sym_db.RegisterMessage(StandardPrepared)
+
+StandardTokenRequest = _reflection.GeneratedProtocolMessageType('StandardTokenRequest', (_message.Message,), {
+  'DESCRIPTOR' : _STANDARDTOKENREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.StandardTokenRequest)
+  })
+_sym_db.RegisterMessage(StandardTokenRequest)
+
+TokenIssued = _reflection.GeneratedProtocolMessageType('TokenIssued', (_message.Message,), {
+  'DESCRIPTOR' : _TOKENISSUED,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.TokenIssued)
+  })
+_sym_db.RegisterMessage(TokenIssued)
 
 ReadFileRequest = _reflection.GeneratedProtocolMessageType('ReadFileRequest', (_message.Message,), {
   'DESCRIPTOR' : _READFILEREQUEST,
@@ -381,101 +436,113 @@ _sym_db.RegisterMessage(KeystoreResponse)
 if _descriptor._USE_C_DESCRIPTORS == False:
 
   DESCRIPTOR._options = None
-  DESCRIPTOR._serialized_options = b'H\003'
-  _PROTOCOLVERSION._serialized_start=5308
-  _PROTOCOLVERSION._serialized_end=5383
+  DESCRIPTOR._serialized_options = b'H\003P\001'
+  _PROTOCOLVERSION._serialized_start=5704
+  _PROTOCOLVERSION._serialized_end=5779
   _ERROR._serialized_start=32
-  _ERROR._serialized_end=230
+  _ERROR._serialized_end=245
   _ERROR_KIND._serialized_start=135
-  _ERROR_KIND._serialized_end=230
-  _GREETING._serialized_start=232
-  _GREETING._serialized_end=268
-  _COMMAND._serialized_start=271
-  _COMMAND._serialized_end=556
-  _COMMANDRESPONSE._serialized_start=559
-  _COMMANDRESPONSE._serialized_end=887
-  _INJECTREQUEST._serialized_start=889
-  _INJECTREQUEST._serialized_end=974
-  _INJECTRESPONSE._serialized_start=977
-  _INJECTRESPONSE._serialized_end=1390
-  _INJECTRESPONSE_OUTCOME._serialized_start=1257
-  _INJECTRESPONSE_OUTCOME._serialized_end=1330
-  _READFILEREQUEST._serialized_start=1392
-  _READFILEREQUEST._serialized_end=1459
-  _READFILERESPONSE._serialized_start=1461
-  _READFILERESPONSE._serialized_end=1506
-  _KILLSERVERREQUEST._serialized_start=1508
-  _KILLSERVERREQUEST._serialized_end=1527
-  _KILLSERVERRESPONSE._serialized_start=1529
-  _KILLSERVERRESPONSE._serialized_end=1549
-  _OPENKEYSTORESESSIONREQUEST._serialized_start=1551
-  _OPENKEYSTORESESSIONREQUEST._serialized_end=1592
-  _KEYSTORESESSIONOPENED._serialized_start=1594
-  _KEYSTORESESSIONOPENED._serialized_end=1653
-  _EXECREQUEST._serialized_start=1656
-  _EXECREQUEST._serialized_end=1874
-  _WINDOWSIZE._serialized_start=1876
-  _WINDOWSIZE._serialized_end=1916
-  _EXECSTARTED._serialized_start=1918
-  _EXECSTARTED._serialized_end=1957
-  _EXECINPUT._serialized_start=1960
-  _EXECINPUT._serialized_end=2110
-  _EXECSTDINEOF._serialized_start=2112
-  _EXECSTDINEOF._serialized_end=2126
-  _EXECEVENT._serialized_start=2129
-  _EXECEVENT._serialized_end=2267
-  _EXECOUTPUT._serialized_start=2269
-  _EXECOUTPUT._serialized_end=2391
-  _EXECOUTPUT_STREAM._serialized_start=2345
-  _EXECOUTPUT_STREAM._serialized_end=2391
-  _EXECEXIT._serialized_start=2393
-  _EXECEXIT._serialized_end=2457
-  _KEYDESCRIPTOR._serialized_start=2459
-  _KEYDESCRIPTOR._serialized_end=2564
-  _KEYPARAMETER._serialized_start=2566
-  _KEYPARAMETER._serialized_end=2683
-  _LISTREQUEST._serialized_start=2685
-  _LISTREQUEST._serialized_end=2805
-  _LISTRESPONSE._serialized_start=2807
-  _LISTRESPONSE._serialized_end=2866
-  _AUTHORIZATION._serialized_start=2868
-  _AUTHORIZATION._serialized_end=2953
-  _KEYMETADATA._serialized_start=2956
-  _KEYMETADATA._serialized_end=3216
-  _GETKEYENTRYREQUEST._serialized_start=3218
-  _GETKEYENTRYREQUEST._serialized_end=3279
-  _GETKEYENTRYRESPONSE._serialized_start=3281
-  _GETKEYENTRYRESPONSE._serialized_end=3346
-  _OPERATIONSTART._serialized_start=3349
-  _OPERATIONSTART._serialized_end=3493
-  _OPERATIONBEGUN._serialized_start=3496
-  _OPERATIONBEGUN._serialized_end=3663
-  _RUNOPERATIONREQUEST._serialized_start=3666
-  _RUNOPERATIONREQUEST._serialized_end=3825
-  _RUNOPERATIONRESPONSE._serialized_start=3827
-  _RUNOPERATIONRESPONSE._serialized_end=3925
-  _OPBEGINREQUEST._serialized_start=3927
-  _OPBEGINREQUEST._serialized_end=3987
-  _OPBEGINRESPONSE._serialized_start=3989
-  _OPBEGINRESPONSE._serialized_end=4050
-  _OPUPDATEAADREQUEST._serialized_start=4052
-  _OPUPDATEAADREQUEST._serialized_end=4085
-  _OPUPDATEAADRESPONSE._serialized_start=4087
-  _OPUPDATEAADRESPONSE._serialized_end=4108
-  _OPUPDATEREQUEST._serialized_start=4110
-  _OPUPDATEREQUEST._serialized_end=4142
-  _OPUPDATERESPONSE._serialized_start=4144
-  _OPUPDATERESPONSE._serialized_end=4194
-  _OPFINISHREQUEST._serialized_start=4196
-  _OPFINISHREQUEST._serialized_end=4281
-  _OPFINISHRESPONSE._serialized_start=4283
-  _OPFINISHRESPONSE._serialized_end=4333
-  _OPABORTREQUEST._serialized_start=4335
-  _OPABORTREQUEST._serialized_end=4351
-  _OPABORTRESPONSE._serialized_start=4353
-  _OPABORTRESPONSE._serialized_end=4370
-  _KEYSTOREREQUEST._serialized_start=4373
-  _KEYSTOREREQUEST._serialized_end=4815
-  _KEYSTORERESPONSE._serialized_start=4818
-  _KEYSTORERESPONSE._serialized_end=5306
+  _ERROR_KIND._serialized_end=245
+  _GREETING._serialized_start=247
+  _GREETING._serialized_end=283
+  _COMMAND._serialized_start=286
+  _COMMAND._serialized_end=601
+  _COMMANDRESPONSE._serialized_start=604
+  _COMMANDRESPONSE._serialized_end=956
+  _OPENINTEGRITYSESSIONREQUEST._serialized_start=958
+  _OPENINTEGRITYSESSIONREQUEST._serialized_end=1057
+  _INTEGRITYSESSIONOPENED._serialized_start=1059
+  _INTEGRITYSESSIONOPENED._serialized_end=1148
+  _INTEGRITYREQUEST._serialized_start=1151
+  _INTEGRITYREQUEST._serialized_end=1350
+  _INTEGRITYRESPONSE._serialized_start=1353
+  _INTEGRITYRESPONSE._serialized_end=1519
+  _CLASSICTOKENREQUEST._serialized_start=1521
+  _CLASSICTOKENREQUEST._serialized_end=1617
+  _PREPARESTANDARDREQUEST._serialized_start=1619
+  _PREPARESTANDARDREQUEST._serialized_end=1673
+  _STANDARDPREPARED._serialized_start=1675
+  _STANDARDPREPARED._serialized_end=1693
+  _STANDARDTOKENREQUEST._serialized_start=1695
+  _STANDARDTOKENREQUEST._serialized_end=1739
+  _TOKENISSUED._serialized_start=1741
+  _TOKENISSUED._serialized_end=1786
+  _READFILEREQUEST._serialized_start=1788
+  _READFILEREQUEST._serialized_end=1855
+  _READFILERESPONSE._serialized_start=1857
+  _READFILERESPONSE._serialized_end=1902
+  _KILLSERVERREQUEST._serialized_start=1904
+  _KILLSERVERREQUEST._serialized_end=1923
+  _KILLSERVERRESPONSE._serialized_start=1925
+  _KILLSERVERRESPONSE._serialized_end=1945
+  _OPENKEYSTORESESSIONREQUEST._serialized_start=1947
+  _OPENKEYSTORESESSIONREQUEST._serialized_end=1988
+  _KEYSTORESESSIONOPENED._serialized_start=1990
+  _KEYSTORESESSIONOPENED._serialized_end=2049
+  _EXECREQUEST._serialized_start=2052
+  _EXECREQUEST._serialized_end=2270
+  _WINDOWSIZE._serialized_start=2272
+  _WINDOWSIZE._serialized_end=2312
+  _EXECSTARTED._serialized_start=2314
+  _EXECSTARTED._serialized_end=2353
+  _EXECINPUT._serialized_start=2356
+  _EXECINPUT._serialized_end=2506
+  _EXECSTDINEOF._serialized_start=2508
+  _EXECSTDINEOF._serialized_end=2522
+  _EXECEVENT._serialized_start=2525
+  _EXECEVENT._serialized_end=2663
+  _EXECOUTPUT._serialized_start=2665
+  _EXECOUTPUT._serialized_end=2787
+  _EXECOUTPUT_STREAM._serialized_start=2741
+  _EXECOUTPUT_STREAM._serialized_end=2787
+  _EXECEXIT._serialized_start=2789
+  _EXECEXIT._serialized_end=2853
+  _KEYDESCRIPTOR._serialized_start=2855
+  _KEYDESCRIPTOR._serialized_end=2960
+  _KEYPARAMETER._serialized_start=2962
+  _KEYPARAMETER._serialized_end=3079
+  _LISTREQUEST._serialized_start=3081
+  _LISTREQUEST._serialized_end=3201
+  _LISTRESPONSE._serialized_start=3203
+  _LISTRESPONSE._serialized_end=3262
+  _AUTHORIZATION._serialized_start=3264
+  _AUTHORIZATION._serialized_end=3349
+  _KEYMETADATA._serialized_start=3352
+  _KEYMETADATA._serialized_end=3612
+  _GETKEYENTRYREQUEST._serialized_start=3614
+  _GETKEYENTRYREQUEST._serialized_end=3675
+  _GETKEYENTRYRESPONSE._serialized_start=3677
+  _GETKEYENTRYRESPONSE._serialized_end=3742
+  _OPERATIONSTART._serialized_start=3745
+  _OPERATIONSTART._serialized_end=3889
+  _OPERATIONBEGUN._serialized_start=3892
+  _OPERATIONBEGUN._serialized_end=4059
+  _RUNOPERATIONREQUEST._serialized_start=4062
+  _RUNOPERATIONREQUEST._serialized_end=4221
+  _RUNOPERATIONRESPONSE._serialized_start=4223
+  _RUNOPERATIONRESPONSE._serialized_end=4321
+  _OPBEGINREQUEST._serialized_start=4323
+  _OPBEGINREQUEST._serialized_end=4383
+  _OPBEGINRESPONSE._serialized_start=4385
+  _OPBEGINRESPONSE._serialized_end=4446
+  _OPUPDATEAADREQUEST._serialized_start=4448
+  _OPUPDATEAADREQUEST._serialized_end=4481
+  _OPUPDATEAADRESPONSE._serialized_start=4483
+  _OPUPDATEAADRESPONSE._serialized_end=4504
+  _OPUPDATEREQUEST._serialized_start=4506
+  _OPUPDATEREQUEST._serialized_end=4538
+  _OPUPDATERESPONSE._serialized_start=4540
+  _OPUPDATERESPONSE._serialized_end=4590
+  _OPFINISHREQUEST._serialized_start=4592
+  _OPFINISHREQUEST._serialized_end=4677
+  _OPFINISHRESPONSE._serialized_start=4679
+  _OPFINISHRESPONSE._serialized_end=4729
+  _OPABORTREQUEST._serialized_start=4731
+  _OPABORTREQUEST._serialized_end=4747
+  _OPABORTRESPONSE._serialized_start=4749
+  _OPABORTRESPONSE._serialized_end=4766
+  _KEYSTOREREQUEST._serialized_start=4769
+  _KEYSTOREREQUEST._serialized_end=5211
+  _KEYSTORERESPONSE._serialized_start=5214
+  _KEYSTORERESPONSE._serialized_end=5702
 # @@protoc_insertion_point(module_scope)

@@ -25,6 +25,21 @@ public final class Agent {
 
     private Agent() {}
 
+    /**
+     * Our end of the socket to the daemon, as a raw descriptor.
+     *
+     * <p>Bound by the native half with {@code RegisterNatives} rather than by
+     * {@code System.loadLibrary}, which could not work: the agent is a mapping
+     * of a memfd and has no name for the runtime to load it by.
+     *
+     * <p>The daemon opened it by having this process call {@code socketpair}
+     * while it was stopped, then taking the far end with {@code pidfd_getfd}.
+     * Nothing was ever bound or connected, so no other process can reach it.
+     *
+     * @return the descriptor, or -1 if the daemon did not open one
+     */
+    public static native int socketFd();
+
     /** Reports what the runtime looks like from inside managed code. */
     public static String probe() {
         Log.i(TAG, "running from a dex the daemon shipped");

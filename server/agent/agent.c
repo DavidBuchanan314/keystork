@@ -353,6 +353,36 @@ EXPORT int keystork_arm(void) {
 static jobject g_loaded_apk = NULL;
 static jobject g_loader = NULL;
 
+// Our end of the socketpair the daemon opened while the process was stopped.
+//
+// It is an ordinary descriptor in this process by the time anything here runs;
+// the daemon made it by having us call socketpair() and then took the other
+// end with pidfd_getfd, so it was never named, bound or connected to. Java
+// reaches it through keystork.Agent.socketFd(), registered below, and adopts
+// it with ParcelFileDescriptor.adoptFd.
+static int g_channel = -1;
+
+static jint ChannelFd(JNIEnv* env, jclass ignored) {
+  (void)env;
+  (void)ignored;
+  return g_channel;
+}
+
+// Java cannot dlopen us -- we are a memfd mapping with no name to load -- so
+// the binding goes the other way: we hand the class its native method while we
+// still have a JNIEnv of our own.
+static int RegisterChannelAccess(JNIEnv* env) {
+  jclass agent = LoadClass(env, g_bootstrap, "keystork.Agent");
+  if (agent == NULL) return -1;
+
+  const JNINativeMethod method = {"socketFd", "()I", (void*)ChannelFd};
+  if ((*env)->RegisterNatives(env, agent, &method, 1) != JNI_OK) {
+    Threw(env, "RegisterNatives(socketFd)");
+    return -1;
+  }
+  return 0;
+}
+
 // The Application the framework will instantiate in place of the app's.
 static const char kApplicationClass[] = "keystork.Shell";
 
@@ -496,13 +526,14 @@ static jobject FindBindData(JNIEnv* env) {
 // which the daemon knows, because it is what it asked `am` to start. Returns 1
 // once the surgery is done, 0 while the bind data is still out of reach, and
 // negative if something that should have worked did not.
-EXPORT int keystork_bind(const char* launch_component) {
+EXPORT int keystork_bind(const char* launch_component, int channel) {
   JNIEnv* env = CurrentEnv(0);
   if (env == NULL) return -1;
   if (g_bootstrap == NULL) {
     LOG("  no dex loaded; stage two did not get that far");
     return -2;
   }
+  g_channel = channel;
 
   jobject data = FindBindData(env);
   if (data == NULL) {
@@ -527,6 +558,12 @@ EXPORT int keystork_bind(const char* launch_component) {
   jobject loader = BuildLoader(env, launch_component);
   if (loader == NULL) return -11;
   g_loader = (*env)->NewGlobalRef(env, loader);
+
+  // keystork.Loader carries no dex of its own and delegates to the one that
+  // does, so every class the app ends up running -- Shell included -- is
+  // defined by g_bootstrap. Registering on the Agent from there is therefore
+  // registering on the very class Shell will reach.
+  if (RegisterChannelAccess(env) != 0) return -12;
 
   // Then the names. getCustomApplicationClassNameForProcess consults
   // mAppClassNamesByProcess before className, so clearing it is what makes

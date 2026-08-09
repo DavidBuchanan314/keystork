@@ -41,6 +41,48 @@ class IdentityError(KeystorkError):
         self.errno = errno
 
 
+class IntegrityError(KeystorkError):
+    """The Play Integrity API refused, inside the app.
+
+    ``code`` is the SDK's own ``IntegrityErrorCode``, kept as the number it is
+    -- the daemon never sees it, and the app passes it through untouched.
+    :data:`INTEGRITY_ERRORS` names the ones the API documents; an unknown one
+    is still carried, because a new code should not need a client change.
+    """
+
+    def __init__(self, code: int, message: str = "") -> None:
+        named = INTEGRITY_ERRORS.get(code)
+        described = f"{named} ({code})" if named else f"integrity error {code}"
+        super().__init__(f"{described}: {message}" if message else described)
+        self.code = code
+        self.name = named
+
+
+# https://developer.android.com/google/play/integrity/reference/.../IntegrityErrorCode
+INTEGRITY_ERRORS = {
+    -1: "API_NOT_AVAILABLE",
+    -2: "PLAY_STORE_NOT_FOUND",
+    -3: "NETWORK_ERROR",
+    -4: "PLAY_STORE_ACCOUNT_NOT_FOUND",
+    -5: "APP_NOT_INSTALLED",
+    -6: "PLAY_SERVICES_NOT_FOUND",
+    -7: "APP_UID_MISMATCH",
+    -8: "TOO_MANY_REQUESTS",
+    -9: "CANNOT_BIND_TO_SERVICE",
+    -10: "NONCE_TOO_SHORT",
+    -11: "NONCE_TOO_LONG",
+    -12: "GOOGLE_SERVER_UNAVAILABLE",
+    -13: "NONCE_IS_NOT_BASE64",
+    -14: "PLAY_STORE_VERSION_OUTDATED",
+    -15: "PLAY_SERVICES_VERSION_OUTDATED",
+    -16: "CLOUD_PROJECT_NUMBER_IS_INVALID",
+    -17: "REQUEST_HASH_TOO_LONG",
+    -18: "CLIENT_TRANSIENT_ERROR",
+    -19: "INTEGRITY_TOKEN_PROVIDER_INVALID",
+    -100: "INTERNAL_ERROR",
+}
+
+
 class UnsupportedByDevice(KeystorkError):
     """This device's keystore2 is too old for the call you asked for.
 
@@ -123,6 +165,9 @@ def from_wire(error: pb.Error) -> KeystorkError:
 
     if kind == pb.Error.IDENTITY:
         return IdentityError(message or "session setup failed", error.code)
+
+    if kind == pb.Error.INTEGRITY:
+        return IntegrityError(error.code, message)
 
     if kind == pb.Error.PROTOCOL:
         return ProtocolError(message or "protocol error")

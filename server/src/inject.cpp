@@ -13,9 +13,11 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -42,8 +44,11 @@ constexpr int kDefaultTimeoutMs = 15000;
 
 // A child that has run this many syscalls without dropping its UID is not an
 // app being specialized. Bounds the damage from a wrong guess about where the
-// landmark is.
-constexpr int kMaxStepsPerChild = 20000;
+// landmark is -- and the damage is somebody else's: every child the zygote
+// forks while we are seized gets stepped, so this is how long an unrelated
+// app's launch can be held up. The target's setresuid arrives within a few
+// hundred, so there is no reason for it to be generous.
+constexpr int kMaxStepsPerChild = 4000;
 
 // <linux/memfd.h>, which the NDK does not ship.
 constexpr unsigned kMfdCloexec = 0x0001;
@@ -299,7 +304,7 @@ constexpr uint64_t kMemfdNameAt = 0;
 constexpr uint64_t kLibraryNameAt = 64;
 constexpr uint64_t kExtInfoAt = 256;
 
-bool InjectAgent(pid_t pid, pb::InjectResponse* response, std::string* error) {
+bool InjectAgent(pid_t pid, uint64_t* handle, std::string* error) {
   const auto agent_size = static_cast<size_t>(kKeystorkAgentEnd - kKeystorkAgentStart);
   KS_LOGI("injecting the %zu-byte agent into %d", agent_size, pid);
 
@@ -379,40 +384,28 @@ bool InjectAgent(pid_t pid, pb::InjectResponse* response, std::string* error) {
           : borrow.Call(loader.function, scratch + kLibraryNameAt, RTLD_NOW, scratch + kExtInfoAt);
   KS_LOGI("%s -> %s", loader.symbol.c_str(), Describe(call).c_str());
 
-  switch (call.outcome) {
-    case CallResult::Outcome::kReturned:
-      response->set_outcome(pb::InjectResponse::RETURNED);
-      response->set_handle(call.value);
-      if (call.value == 0) {
-        const std::string reason = RemoteDlerror(pid, &tracee, &borrow);
-        KS_LOGE("the linker refused the agent: %s",
-                reason.empty() ? "(no dlerror)" : reason.c_str());
-      }
-      // The linker has mapped what it needs, so the descriptor can go. The
-      // scratch page deliberately stays: the library name lived in it, and
-      // bionic is believed to copy that rather than retain the pointer, but
-      // being wrong would mean the app crashing on some later dl_iterate_phdr
-      // rather than here. One page is not worth that.
-      borrow.Syscall(SYS_close, fd);
-      break;
-
-    case CallResult::Outcome::kExited:
-      // The expected result: the agent's constructor called _exit, so dlopen
-      // never returned and there is nothing left to clean up.
-      response->set_outcome(pb::InjectResponse::EXITED);
-      response->set_exit_status(call.status);
-      break;
-
-    case CallResult::Outcome::kFaulted:
-      response->set_outcome(pb::InjectResponse::FAULTED);
-      response->set_fault_signal(call.signal);
-      response->set_fault_address(call.fault_address);
-      break;
-
-    case CallResult::Outcome::kFailed:
-      *error = tracee.ok() ? "the call into the linker failed" : tracee.error();
-      return false;
+  // Every outcome but a returning dlopen is now a failure. That is a change:
+  // the agent used to _exit from its constructor to prove it had run, which
+  // made EXITED an ordinary result. It returns instead, and a process that
+  // died inside dlopen is a process there is no session to have with.
+  if (!call.returned()) {
+    *error = "dlopen of the agent " + Describe(call);
+    if (call.outcome == CallResult::Outcome::kFailed && !tracee.ok()) *error = tracee.error();
+    return false;
   }
+  if (call.value == 0) {
+    const std::string reason = RemoteDlerror(pid, &tracee, &borrow);
+    *error = "the linker refused the agent: " + (reason.empty() ? "(no dlerror)" : reason);
+    return false;
+  }
+
+  // The linker has mapped what it needs, so the descriptor can go. The scratch
+  // page deliberately stays: the library name lived in it, and bionic is
+  // believed to copy that rather than retain the pointer, but being wrong
+  // would mean the app crashing on some later dl_iterate_phdr rather than
+  // here. One page is not worth that.
+  borrow.Syscall(SYS_close, fd);
+  *handle = call.value;
   return true;
 }
 
@@ -556,12 +549,12 @@ bool RemoteSymbol(pid_t pid, uint64_t handle, const char* symbol, uint64_t* addr
 
 // Calls one of the agent's entry points in the stopped target and hands back
 // what it returned.
-bool CallAgent(pid_t pid, uint64_t function, const char* symbol, uint64_t argument,
+bool CallAgent(pid_t pid, uint64_t function, const char* symbol, uint64_t first, uint64_t second,
                int* agent_result, std::string* error) {
   Tracee tracee(pid);
   Borrow borrow(&tracee);
 
-  const CallResult called = borrow.Call(function, argument);
+  const CallResult called = borrow.Call(function, first, second);
   if (!called.returned()) {
     *error = std::string(symbol) + " " + Describe(called);
     return false;
@@ -576,12 +569,72 @@ bool CallAgent(pid_t pid, uint64_t function, const char* symbol, uint64_t argume
 // guess about that.
 constexpr int kMaxLooperPolls = 64;
 
+// A connected socket to the target, with no name anywhere.
+//
+// The target makes the pair itself, with a remote syscall, and we take one end
+// out of it with pidfd_getfd -- so nothing is ever bound, published or
+// connected to. That is the point rather than a flourish: an abstract socket
+// the app connected to would put an SELinux `unix_stream_socket connectto`
+// check between untrusted_app and this daemon's domain, which stock policy
+// denies, and getting around it would mean mislabelling the socket or patching
+// policy. A socketpair triggers no such check, because no connect happens. The
+// only permission involved is pidfd_getfd's PTRACE_MODE_ATTACH_REALCREDS,
+// which we hold because we are ptracing the process at this instant.
+//
+// Neither end has a name, so no other process can find it: the app's end is
+// reachable only from inside that process, and ours only from inside this one.
+//
+// `theirs` is the descriptor number in the target, which the agent needs so
+// Java can adopt it. `ours` is a real descriptor here.
+bool OpenChannel(pid_t pid, uint64_t scratch, int* ours, int* theirs, std::string* error) {
+  Tracee tracee(pid);
+  Borrow borrow(&tracee);
+
+  const int64_t made = borrow.Syscall(SYS_socketpair, AF_UNIX, SOCK_STREAM, 0, scratch);
+  if (SyscallFailed(made)) {
+    *error = std::string("socketpair in the target failed: ") +
+             ::strerror(static_cast<int>(-made));
+    return false;
+  }
+
+  int pair[2] = {-1, -1};
+  if (!tracee.ReadMemory(scratch, pair, sizeof(pair))) {
+    *error = tracee.error();
+    return false;
+  }
+
+  // pidfd_open/pidfd_getfd are 5.6 and have no bionic wrappers at this API
+  // level, so they go through syscall() by number.
+  const long pidfd = ::syscall(__NR_pidfd_open, pid, 0);
+  if (pidfd < 0) {
+    *error = std::string("pidfd_open on the target failed: ") + ::strerror(errno);
+    return false;
+  }
+  const long taken = ::syscall(__NR_pidfd_getfd, pidfd, pair[0], 0);
+  const int why = errno;
+  ::close(static_cast<int>(pidfd));
+  if (taken < 0) {
+    *error = std::string("pidfd_getfd of the target's socket failed: ") + ::strerror(why);
+    return false;
+  }
+
+  // The target keeps one end only; ours is a duplicate of the other, and the
+  // one it was duplicated from would otherwise sit there holding the channel
+  // open from both sides.
+  borrow.Syscall(SYS_close, static_cast<uint64_t>(pair[0]));
+
+  *ours = static_cast<int>(taken);
+  *theirs = pair[1];
+  KS_LOGI("channel to %d: fd %d here, fd %d there", pid, *ours, *theirs);
+  return tracee.ok() ? true : (*error = tracee.error(), false);
+}
+
 // Stage three: stop the main thread each time it polls, and ask the agent
 // whether the app's bind data has arrived yet. The agent does the surgery the
 // moment it can see it -- with the process stopped, before the message has
 // been dispatched, so nothing about it is a race.
 bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class, int64_t deadline,
-                   uint32_t* steps_taken, int* agent_result, std::string* error) {
+                   int* channel, uint32_t* steps_taken, int* agent_result, std::string* error) {
   uint64_t entry = 0;
   if (!RemoteSymbol(pid, handle, "keystork_bind", &entry, error)) return false;
 
@@ -608,6 +661,15 @@ bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class
     }
   }
 
+  // The channel is opened before the surgery rather than after it: the agent
+  // is told the descriptor number as it installs itself, so the number is
+  // already there by the time the app's Application asks for it -- which
+  // happens after we have detached and can no longer reach into the process.
+  // A page's worth of scratch is plenty for both the name and the two ints,
+  // which go far enough past it not to overlap.
+  int theirs = -1;
+  if (!OpenChannel(pid, scratch + page / 2, channel, &theirs, error)) return false;
+
   int total = 0;
   for (int poll = 1; poll <= kMaxLooperPolls; poll++) {
     int steps = 0;
@@ -615,7 +677,10 @@ bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class
     total += steps;
 
     int said = 0;
-    if (!CallAgent(pid, entry, "keystork_bind", scratch, &said, error)) return false;
+    if (!CallAgent(pid, entry, "keystork_bind", scratch, static_cast<uint64_t>(theirs), &said,
+                   error)) {
+      return false;
+    }
     if (said < 0) {
       *error = "keystork_bind failed (" + std::to_string(said) + "); see logcat";
       return false;
@@ -647,7 +712,75 @@ struct Child {
   int steps = 0;
 };
 
-void LetGo(pid_t pid) { ::ptrace(PTRACE_DETACH, pid, nullptr, nullptr); }
+// Detaches, whether or not the tracee is stopped.
+//
+// This is not a nicety. Every ptrace request except ATTACH, SEIZE, INTERRUPT
+// and KILL needs the tracee to be in ptrace-stop, and PTRACE_SEIZE -- unlike
+// ATTACH -- deliberately leaves it *running*. So a bare PTRACE_DETACH on a
+// seized tracee normally fails with ESRCH and leaves it attached, which for
+// the zygote means it is still carrying TRACEFORK: its next fork stops it, and
+// with our wait loop over nothing reaps that stop. It then sits there while
+// the system server waits for a pid it will never get, holding the activity
+// manager's lock, until Watchdog kills the system server sixty seconds later.
+//
+// PTRACE_INTERRUPT is what makes a running seized tracee stop on demand, so
+// the sequence is interrupt, reap whatever stop that produces, then detach.
+bool LetGo(pid_t pid) {
+  if (::ptrace(PTRACE_DETACH, pid, nullptr, nullptr) == 0) return true;
+  if (errno != ESRCH) return false;
+
+  if (::ptrace(PTRACE_INTERRUPT, pid, nullptr, nullptr) != 0) {
+    // ESRCH here means it is genuinely gone rather than merely running, which
+    // is the one case where being unable to detach is fine.
+    return errno == ESRCH;
+  }
+
+  for (int attempt = 0; attempt < 64; attempt++) {
+    int status = 0;
+    if (::waitpid(pid, &status, __WALL) < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (!WIFSTOPPED(status)) return true;  // it died on its own; nothing to do
+
+    // A signal that was about to be delivered is the tracee's, and detaching
+    // with 0 would swallow it -- the same mistake that used to leave the
+    // zygote's dead children unreaped.
+    const int event = (status >> 16) & 0xff;
+    const int signal = WSTOPSIG(status);
+    const int deliver =
+        (event == 0 && signal != SIGTRAP && signal != kSyscallTrap && signal != SIGSTOP) ? signal
+                                                                                         : 0;
+    if (::ptrace(PTRACE_DETACH, pid, nullptr,
+                 reinterpret_cast<void*>(static_cast<long>(deliver))) == 0) {
+      return true;
+    }
+    if (errno != ESRCH) return false;
+  }
+  return false;
+}
+
+// Whether `pid` still has a tracer, which after LetGo should be nobody. Read
+// rather than assumed because a zygote we failed to release is a device-wide
+// hazard: nothing on it can start an app until this process exits.
+bool StillTraced(pid_t pid) {
+  char path[64];
+  ::snprintf(path, sizeof(path), "/proc/%d/status", pid);
+  FILE* status = ::fopen(path, "re");
+  if (status == nullptr) return false;
+
+  bool traced = false;
+  char line[256];
+  while (::fgets(line, sizeof(line), status) != nullptr) {
+    int tracer = 0;
+    if (::sscanf(line, "TracerPid: %d", &tracer) == 1) {
+      traced = tracer != 0;
+      break;
+    }
+  }
+  ::fclose(status);
+  return traced;
+}
 
 // Launches the package and returns the process the zygote forked for it,
 // stopped at the exit of the setresuid that gave it its identity.
@@ -800,8 +933,14 @@ pid_t CatchTarget(pid_t zygote, uid_t uid, const std::string& package,
   ::alarm(0);
   ::sigaction(SIGALRM, &previous, nullptr);
 
+  // Anything still being stepped is running, not stopped, so these go through
+  // the interrupt path -- a child left attached would freeze at its next
+  // syscall with nobody to resume it, which for somebody else's app is a
+  // process that never starts.
   for (const auto& entry : children) {
-    if (entry.first != target) LetGo(entry.first);
+    if (entry.first != target && !LetGo(entry.first)) {
+      KS_LOGE("could not let go of %d; it may be stuck", entry.first);
+    }
   }
 
   if (target > 0) {
@@ -817,10 +956,11 @@ pid_t CatchTarget(pid_t zygote, uid_t uid, const std::string& package,
 
 }  // namespace
 
-void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* response) {
+bool OpenIntegritySession(const pb::OpenIntegritySessionRequest& request,
+                          pb::CommandResponse* response, IntegritySession* session) {
   if (request.package().empty()) {
-    FillProtocolError("inject needs a package", response->mutable_error());
-    return;
+    FillProtocolError("an integrity session needs a package", response->mutable_error());
+    return false;
   }
   const auto uid = static_cast<uid_t>(request.uid());
   const int timeout_ms =
@@ -829,7 +969,7 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
   const pid_t zygote = FindZygote();
   if (zygote < 0) {
     FillIdentityError("no zygote64 process on this device", 0, response->mutable_error());
-    return;
+    return false;
   }
   KS_LOGI("zygote64 is pid %d", zygote);
 
@@ -841,7 +981,7 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
   std::string activity_class;
   if (!ResolveLaunchActivity(request.package(), &component, &activity_class, &error)) {
     FillIdentityError(error, 0, response->mutable_error());
-    return;
+    return false;
   }
   KS_LOGI("launching %s; the agent answers for %s", component.c_str(), activity_class.c_str());
 
@@ -853,80 +993,164 @@ void HandleInject(const pb::InjectRequest& request, pb::CommandResponse* respons
   if (::ptrace(PTRACE_SEIZE, zygote, nullptr, reinterpret_cast<void*>(PTRACE_O_TRACEFORK)) != 0) {
     FillIdentityError(std::string("could not seize the zygote: ") + ::strerror(errno), errno,
                       response->mutable_error());
-    return;
+    return false;
   }
 
-  const pid_t target =
-      CatchTarget(zygote, uid, request.package(), component, timeout_ms, &error);
+  const pid_t target = CatchTarget(zygote, uid, request.package(), component, timeout_ms, &error);
 
-  // Let go the moment we have what we came for; nothing else on the device can
-  // start an app until we do.
-  ::ptrace(PTRACE_DETACH, zygote, nullptr, nullptr);
+  // Let go the moment we have what we came for. This is the single most
+  // dangerous line in the daemon: a zygote we fail to release is still
+  // carrying TRACEFORK, so its next fork stops it with nobody left to reap the
+  // stop, and the system server's procStart thread then blocks in
+  // attemptZygoteSendArgsAndGetResult holding the lock every process start
+  // needs -- until Watchdog kills the system server a minute later and the
+  // device appears to reboot. Verified rather than assumed for that reason.
+  if (!LetGo(zygote) || StillTraced(zygote)) {
+    KS_LOGE("could not release the zygote (%d); no app on this device can start "
+            "until this process exits",
+            zygote);
+  }
 
   if (target < 0) {
     FillIdentityError(error, 0, response->mutable_error());
-    return;
+    return false;
   }
 
-  auto* result = response->mutable_inject();
-  result->set_pid(target);
-  result->set_uid(uid);
+  // Everything from here happens with the target stopped, so none of it races
+  // the app's startup: it runs exactly the functions we ask it to and nothing
+  // else. The three stages are the agent in, the runtime reachable, and the
+  // app's own code off the classpath.
+  uint64_t handle = 0;
+  uint32_t arm_steps = 0;
+  uint32_t bind_steps = 0;
+  int channel = -1;
+  bool opened = InjectAgent(target, &handle, &error);
 
-  bool injected = InjectAgent(target, result, &error);
-
-  // Second stage. Still attached, so none of this races the app: the target is
-  // stopped except while running exactly the function we asked it to.
-  if (injected && result->outcome() == pb::InjectResponse::RETURNED && result->handle() != 0) {
+  if (opened) {
     int steps = 0;
     const int64_t deadline = NowMs() + timeout_ms;
     if (!StepToSyscallExit(target, SyscallArgumentIs(SYS_ioctl, 1, kBinderSetMaxThreads), deadline,
                            &steps, &error)) {
-      injected = false;
+      opened = false;
     } else {
-      result->set_arm_steps(static_cast<uint32_t>(steps));
+      arm_steps = static_cast<uint32_t>(steps);
       KS_LOGI("reached the binder threadpool setup after %d syscalls", steps);
 
       uint64_t arm = 0;
-      int agent_result = 0;
-      if (!RemoteSymbol(target, result->handle(), "keystork_arm", &arm, &error) ||
-          !CallAgent(target, arm, "keystork_arm", 0, &agent_result, &error)) {
-        injected = false;
+      int armed = 0;
+      if (!RemoteSymbol(target, handle, "keystork_arm", &arm, &error) ||
+          !CallAgent(target, arm, "keystork_arm", 0, 0, &armed, &error)) {
+        opened = false;
+      } else if (armed != 0) {
+        error = "keystork_arm reported " + std::to_string(armed) + "; see logcat";
+        opened = false;
       } else {
-        result->set_arm_result(agent_result);
-        KS_LOGI("keystork_arm -> %d", agent_result);
-
-        // Third stage: the bind. Everything the app would have run is named in
-        // a message that has not been dispatched yet.
-        uint32_t bind_steps = 0;
-        int bind_result = 0;
-        if (!InterceptBind(target, result->handle(), activity_class, deadline, &bind_steps,
-                           &bind_result, &error)) {
-          injected = false;
-        } else {
-          result->set_bind_steps(bind_steps);
-          result->set_bind_result(bind_result);
-        }
+        int bound = 0;
+        opened = InterceptBind(target, handle, activity_class, deadline, &channel, &bind_steps,
+                               &bound, &error);
       }
     }
   }
 
-  // Resumes it wherever it was stopped, with its own registers back.
-  // Specialization or startup carries on and the app boots. EXITKILL goes with
-  // the ptrace relationship, so detaching is also what stops this connection
-  // ending from taking the app with it.
-  ::ptrace(PTRACE_DETACH, target, nullptr, nullptr);
+  // Resumes it wherever it was stopped, with its own registers back, and drops
+  // EXITKILL with the ptrace relationship -- which is what stops this
+  // connection ending from taking the app down before we mean it to. It is
+  // stopped here rather than running, so the plain detach inside LetGo is the
+  // one that fires; the interrupt path is there for the cases that are not.
+  if (!LetGo(target)) KS_LOGE("could not detach from %d", target);
 
-  // Only when the process did not survive: AMS would otherwise keep restarting
-  // something that dies every time. A process that came back from dlopen is
-  // meant to carry on booting, and force-stopping it would undo the point.
-  if (!injected || result->outcome() != pb::InjectResponse::RETURNED) {
+  if (!opened) {
+    KS_LOGE("could not open an integrity session in %d: %s", target, error.c_str());
+    // AMS would restart-loop a process that dies on every launch, and a
+    // half-injected one is not something to leave running either.
     SpawnAndWait({"/system/bin/am", "force-stop", request.package()});
+    if (channel >= 0) ::close(channel);
+    FillIdentityError(error, 0, response->mutable_error());
+    return false;
   }
 
-  if (!injected) {
-    KS_LOGE("injection into %d failed: %s", target, error.c_str());
-    FillIdentityError(error, 0, response->mutable_error());
+  auto* opened_response = response->mutable_open_integrity_session();
+  opened_response->set_pid(target);
+  opened_response->set_uid(uid);
+  opened_response->set_arm_steps(arm_steps);
+  opened_response->set_bind_steps(bind_steps);
+
+  session->channel = channel;
+  session->pid = target;
+  session->package = request.package();
+  return true;
+}
+
+// The session itself: bytes from the client to the app and back, until one of
+// them stops.
+//
+// A byte pump and nothing more. The messages are a contract between the Python
+// client and the Java in the app -- the daemon has never parsed one and does
+// not need to, which is what lets the protocol grow without it changing.
+//
+// Both directions are polled together for the same reason exec's pump is: a
+// blocking read on one side would sit there while the other had something to
+// say. Requests here are small and strictly paired, so there is no high-water
+// mark to keep -- a stalled reader cannot build a backlog of one message.
+int RunIntegritySession(int client_fd, IntegritySession* session) {
+  KS_LOGI("integrity session with %s (pid %d) is open", session->package.c_str(), session->pid);
+
+  char chunk[16384];
+  bool running = true;
+  while (running) {
+    pollfd watching[2] = {{client_fd, POLLIN, 0}, {session->channel, POLLIN, 0}};
+    if (::poll(watching, 2, -1) < 0) {
+      if (errno == EINTR) continue;
+      KS_LOGE("poll on the integrity session failed: %s", ::strerror(errno));
+      break;
+    }
+
+    for (int side = 0; side < 2 && running; side++) {
+      if ((watching[side].revents & (POLLIN | POLLHUP | POLLERR)) == 0) continue;
+
+      const int from = watching[side].fd;
+      const int to = side == 0 ? session->channel : client_fd;
+      const ssize_t got = ::read(from, chunk, sizeof(chunk));
+      if (got < 0 && errno == EINTR) continue;
+      // One line per chunk. The daemon cannot say what it relayed -- it does
+      // not parse any of this -- but "how much, which way, when" is the whole
+      // of what it can contribute when a session hangs, and a session carries
+      // few enough messages for that to stay readable.
+      KS_LOGI("relaying %zd bytes %s", got, side == 0 ? "to the app" : "to the client");
+      if (got <= 0) {
+        // Either the client hung up or the app did. Both end the session:
+        // there is no one left to answer, and nothing to answer to.
+        KS_LOGI("the %s end closed the integrity session", side == 0 ? "client" : "app");
+        running = false;
+        break;
+      }
+
+      for (ssize_t at = 0; at < got;) {
+        const ssize_t put = ::write(to, chunk + at, static_cast<size_t>(got - at));
+        if (put > 0) {
+          at += put;
+          continue;
+        }
+        if (put < 0 && errno == EINTR) continue;
+        KS_LOGE("relay write failed: %s", ::strerror(errno));
+        running = false;
+        break;
+      }
+    }
   }
+
+  ::close(session->channel);
+  session->channel = -1;
+
+  // The app must not outlive the connection that launched it -- the same rule
+  // exec lives by, and for the same reason: nothing else on the device knows
+  // this process is there, so a survivor is a process with no owner holding an
+  // app's identity. Its own read returns EOF as soon as the channel closes
+  // above, and it exits on that; the force-stop is the backstop for an app
+  // that has stopped listening.
+  SpawnAndWait({"/system/bin/am", "force-stop", session->package});
+  KS_LOGI("integrity session with %s ended", session->package.c_str());
+  return 0;
 }
 
 }  // namespace keystork

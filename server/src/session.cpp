@@ -684,6 +684,7 @@ int RunConnection(int fd, pid_t supervisor_pid) {
 
   SessionState session;
   ExecProcess process;
+  IntegritySession integrity;
   std::string encoded;
 
   // Top level: root, one Command at a time, until one hands the connection to
@@ -700,6 +701,7 @@ int RunConnection(int fd, pid_t supervisor_pid) {
     pb::Command command;
     bool kill_requested = false;
     bool exec_started = false;
+    bool integrity_opened = false;
 
     if (!command.ParseFromString(encoded)) {
       FillProtocolError("malformed command", response.mutable_error());
@@ -734,10 +736,13 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           }
           break;
         }
-        case pb::Command::kInject:
-          // Seconds rather than a round trip, and the only command here that
-          // is neither instant nor a hand-over: it has to catch a zygote fork.
-          HandleInject(command.inject(), &response);
+        case pb::Command::kOpenIntegritySession:
+          // Irreversible like the two above, and slower than anything else at
+          // this level: it has to catch a zygote fork, so it takes seconds
+          // rather than a round trip. On success the connection is a
+          // conversation with the app for the rest of its life.
+          integrity_opened = OpenIntegritySession(command.open_integrity_session(), &response,
+                                                  &integrity);
           break;
         case pb::Command::BODY_NOT_SET:
           // Also what a newer client's unimplemented command looks like here:
@@ -764,6 +769,10 @@ int RunConnection(int fd, pid_t supervisor_pid) {
     // The client has been told the child's pid; everything after this is its
     // stdio, in both directions and unprompted.
     if (exec_started) return RunExecSession(fd, &process);
+
+    // Likewise: the client has been told the app is up, and everything after
+    // this belongs to it.
+    if (integrity_opened) return RunIntegritySession(fd, &integrity);
   }
 
   // Keystore subprotocol: only these messages, for the rest of the connection.

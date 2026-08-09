@@ -8,6 +8,7 @@ opening a second session.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import socket
 from dataclasses import dataclass, field
@@ -41,6 +42,11 @@ from .process import (
 from .transport import Transport
 
 PROTOCOL_VERSION = pb.PROTOCOL_VERSION_1
+
+# A token request is the app talking to Play over the network, so it is bounded
+# by that rather than by anything local. Preparing a Standard provider is the
+# slowest of them.
+INTEGRITY_TIMEOUT = 120.0
 
 #: Where ``adb forward tcp:9432 localabstract:keystork`` puts the daemon.
 DEFAULT_HOST = "127.0.0.1"
@@ -712,20 +718,24 @@ class Connection:
         # request/response transport has nothing left to do.
         return Process(self._transport.detach(), started)
 
-    def inject(
+    def open_integrity_session(
         self,
         package: str,
         *,
         uid: Optional[int] = None,
         user: int = 0,
         timeout_ms: Optional[int] = None,
-    ) -> pb.InjectResponse:
-        """Launch `package` and load the daemon's agent into it before its own code runs.
+    ) -> "IntegritySession":
+        """Launch `package` with our code in place of its own, and talk to it.
 
         Seconds rather than a round trip: the daemon force-stops the package,
         seizes the zygote, launches the app, and steps the forked child until
         it takes the app's UID. Progress goes to logcat, since a single
         request/response has nowhere else to put it.
+
+        One-way, like a keystore session: this connection can never open
+        another session or run another top-level command, and the app lives
+        exactly as long as it does -- closing the session ends the app.
 
         `uid` is resolved from the device's package list over this same
         connection if not given -- the daemon has no notion of packages beyond
@@ -733,13 +743,19 @@ class Connection:
         """
         if uid is None:
             uid = self.resolve_package(package, user)
-        request = pb.InjectRequest(package=package, uid=uid)
+        request = pb.OpenIntegritySessionRequest(package=package, uid=uid)
         if timeout_ms is not None:
             request.timeout_ms = timeout_ms
+
         # The daemon spends most of this waiting on a fork, so the usual
         # per-round-trip timeout is the wrong bound.
         deadline = (timeout_ms or 15000) / 1000 + 20
-        return self._command(pb.Command(inject=request), timeout=deadline).inject
+        opened = self._command(
+            pb.Command(open_integrity_session=request), timeout=deadline
+        ).open_integrity_session
+        self._session_open = True
+        self._handed_to = f"an integrity session with {package}"
+        return IntegritySession._attach(self, package, opened)
 
     def _open_keystore(self, uid: int) -> pb.KeystoreSessionOpened:
         if uid < 0:
@@ -1379,3 +1395,176 @@ class KeystoreSession:
         if self._package is not None:
             who = f"{self._package} ({who})"
         return f"<keystork.KeystoreSession {who} on {self._connection.device} {state}>"
+
+
+class IntegritySession:
+    """A conversation with our own code, running inside an app's process.
+
+    The app was launched with its own code taken off every classpath in the
+    process before a line of it ran, so what answers here is ours -- but the
+    process is the app's, at the app's UID and with its package and signing
+    certificate, which is what Play Integrity identifies the caller by.
+
+    >>> with keystork.Connection() as conn:
+    ...     with conn.open_integrity_session("com.example.app") as integrity:
+    ...         token = integrity.classic(nonce=os.urandom(32))
+
+    The app lives exactly as long as this session. Closing it -- or dropping
+    the connection -- ends the process, which is deliberate: nothing else on
+    the device knows the process is there, so a survivor would be a process
+    with no owner holding an app's identity.
+
+    The daemon relays these messages without reading them; they are a contract
+    between this class and the Java in the app.
+    """
+
+    def __init__(
+        self,
+        package: str,
+        device: Optional[Device] = None,
+        *,
+        uid: Optional[int] = None,
+        user: int = 0,
+        timeout_ms: Optional[int] = None,
+    ) -> None:
+        connection = Connection(device)
+        try:
+            opened = connection.open_integrity_session(
+                package, uid=uid, user=user, timeout_ms=timeout_ms
+            )
+        except BaseException:
+            connection.close()
+            raise
+        self._adopt(connection, package, opened._opened)
+
+    @classmethod
+    def _attach(
+        cls, connection: Connection, package: str, opened: pb.IntegritySessionOpened
+    ) -> "IntegritySession":
+        """Wrap a connection that has already transitioned, without dialing."""
+        session = cls.__new__(cls)
+        session._adopt(connection, package, opened)
+        return session
+
+    def _adopt(
+        self, connection: Connection, package: str, opened: pb.IntegritySessionOpened
+    ) -> None:
+        self._connection = connection
+        self._transport = connection._transport
+        self._package = package
+        self._opened = opened
+
+    # -- properties ---------------------------------------------------------
+
+    @property
+    def package(self) -> str:
+        """The app whose process this session is talking to."""
+        return self._package
+
+    @property
+    def pid(self) -> int:
+        """That process, on the device."""
+        return self._opened.pid
+
+    @property
+    def uid(self) -> int:
+        """The UID it runs as, which is the app's."""
+        return self._opened.uid
+
+    @property
+    def steps(self) -> Tuple[int, int]:
+        """What the injection cost in stepped syscalls: to the runtime, then to the bind."""
+        return (self._opened.arm_steps, self._opened.bind_steps)
+
+    # -- calls --------------------------------------------------------------
+
+    def classic(
+        self,
+        nonce: Union[bytes, str],
+        *,
+        cloud_project_number: Optional[int] = None,
+    ) -> str:
+        """Request a classic integrity token. Returns it as the API gave it.
+
+        `nonce` may be raw bytes, which are encoded here as the API requires --
+        URL-safe base64, unpadded and unwrapped, 16..500 bytes once decoded --
+        or a string, which is passed through untouched for a caller who has
+        already done that.
+
+        `cloud_project_number` is only needed for an app Google Play does not
+        know; the ordinary case is the app's own linked project, which the API
+        finds for itself.
+
+        The token is a JWE. Its verdicts are readable only by Play, or by
+        whoever holds the app's decryption keys -- nothing here looks inside.
+        """
+        request = pb.ClassicTokenRequest(nonce=_integrity_nonce(nonce))
+        if cloud_project_number is not None:
+            request.cloud_project_number = cloud_project_number
+        return self._exchange(pb.IntegrityRequest(classic=request)).token.token
+
+    def prepare_standard(self, cloud_project_number: int) -> None:
+        """Prepare the Standard-mode token provider. Slow, and done once.
+
+        The provider it builds stays warm in the app for the rest of the
+        session, which is the reason this is a session at all.
+        """
+        self._exchange(
+            pb.IntegrityRequest(
+                prepare_standard=pb.PrepareStandardRequest(
+                    cloud_project_number=cloud_project_number
+                )
+            )
+        )
+
+    def standard(self, request_hash: str) -> str:
+        """Issue a Standard-mode token from the prepared provider.
+
+        `request_hash` is bound into the token and is yours to choose --
+        typically a digest of whatever the token is vouching for. Call
+        :meth:`prepare_standard` first; the app has nothing to issue from
+        otherwise.
+        """
+        return self._exchange(
+            pb.IntegrityRequest(standard=pb.StandardTokenRequest(request_hash=request_hash))
+        ).token.token
+
+    # -- plumbing -----------------------------------------------------------
+
+    def _exchange(self, request: pb.IntegrityRequest) -> pb.IntegrityResponse:
+        """One request, one response. The session allows nothing in between."""
+        self._transport.send(request)
+        # A token request talks to Play over the network, which is slower than
+        # anything else in this protocol and is the app waiting, not us.
+        with self._transport.deadline(INTEGRITY_TIMEOUT):
+            response = self._transport.recv(pb.IntegrityResponse())
+        if response.WhichOneof("body") == "error":
+            raise errors.from_wire(response.error)
+        return response
+
+    def close(self) -> None:
+        """End the session, the connection it took over, and the app."""
+        self._connection.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._transport.closed
+
+    def __enter__(self) -> "IntegritySession":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        state = "closed" if self.closed else f"pid {self.pid}"
+        return f"<IntegritySession {self._package} ({state})>"
+
+
+def _integrity_nonce(nonce: Union[bytes, str]) -> str:
+    """The API's nonce format: URL-safe base64, no padding, no wrapping."""
+    if isinstance(nonce, str):
+        return nonce
+    if not 16 <= len(nonce) <= 500:
+        raise ValueError(f"a nonce must be 16..500 bytes, got {len(nonce)}")
+    return base64.urlsafe_b64encode(nonce).decode("ascii").rstrip("=")
