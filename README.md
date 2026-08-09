@@ -15,7 +15,8 @@ An incomplete list of features:
 
 - Play Integrity token minting.
 - Unrestricted KeyStore access (including Android Key Attestation)
-- `X-Goog-Spatula` header minting (assuming a pre-provisioned DeviceKey).
+- `X-Goog-Spatula` token minting (assuming a pre-provisioned DeviceKey).
+- `X-Firebase-AppCheck` token minting.
 - Remote file read (like `adb pull`).
 - Remote execve (like `adb shell`, but also scriptable via Python API).
 

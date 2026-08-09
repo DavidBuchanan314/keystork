@@ -151,6 +151,27 @@ def cert_hash(der: bytes) -> str:
     return base64.b64encode(hashlib.sha1(der).digest()).decode("ascii")
 
 
+def cert_fingerprint(der: bytes) -> str:
+    """`SHA1(der)` as uppercase hex, unseparated -- the X-Android-Cert form.
+
+    The same hash as `cert_hash` in the other encoding Google uses. An
+    Android-restricted API key is checked against this and the package name, so
+    it is what a caller off the device has to send to be taken for the app.
+    """
+    return hashlib.sha1(der).hexdigest().upper()
+
+
 def package_cert_hash(conn: "Connection", package: str) -> str:
     """The `cert_hash` of `package`'s signing certificate, read from the device."""
     return cert_hash(signing_cert(conn, package))
+
+
+def package_cert_fingerprint(conn: "Connection", package: str) -> str:
+    """The `cert_fingerprint` of `package`'s signing certificate, read from the device.
+
+    This is the installed certificate, so for an app distributed through Play
+    it is Play's app-signing key rather than the upload key -- which is the one
+    Google's servers will check against, and the reason reading it from the
+    device beats looking it up.
+    """
+    return cert_fingerprint(signing_cert(conn, package))

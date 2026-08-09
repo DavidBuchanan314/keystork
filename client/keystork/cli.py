@@ -41,6 +41,7 @@ from .enums import (
 )
 from .keystore import KeyDescriptor, KeyMetadata, KeystoreSession, nonce_length
 from .process import ESCAPE, local_window, stdin_is_tty
+from .util import appcheck
 from .util.packages import (
     PACKAGES_XML,
     cert_hash,
@@ -326,6 +327,47 @@ def _build_parser() -> argparse.ArgumentParser:
         "The device key signs whatever name and hash it is given, so this is how to mint a "
         "header for a package that is not installed here -- take the hash from that app's APK "
         "(the first certificate in its v2/v3 signing block) or from a device that has it",
+    )
+
+    appcheck_token = commands.add_parser(
+        "firebase-appcheck",
+        help="mint a Firebase App Check token as an installed app",
+        description="Asks Firebase for a challenge, launches the app and has it mint a "
+        "classic Play Integrity token for that challenge, then trades the token in. Prints "
+        "the value for the X-Firebase-AppCheck header. The three identifiers below are the "
+        "app's own and ship inside its APK -- look in res/values/strings.xml and the "
+        "Firebase config. Takes seconds, and kills the app when it is done.",
+    )
+    appcheck_token.add_argument("package", help="the app to mint a token as")
+    appcheck_token.add_argument(
+        "--project-number", required=True, metavar="N", help="Firebase project number"
+    )
+    appcheck_token.add_argument(
+        "--app-id",
+        required=True,
+        metavar="ID",
+        help="Firebase app id, e.g. 1:123456789:android:abcdef0123456789",
+    )
+    appcheck_token.add_argument(
+        "--api-key", required=True, metavar="KEY", help="the app's Web API key, AIzaSy...",
+    )
+    appcheck_token.add_argument(
+        "--uid", type=int, help="the UID to expect (default: resolved from the package list)"
+    )
+    appcheck_token.add_argument("--user", type=int, default=0, help="Android user id (default: 0)")
+    appcheck_token.add_argument(
+        "--cert",
+        metavar="SHA1",
+        help="use this signing certificate fingerprint (uppercase hex, no colons) instead of "
+        "reading the signer from the device",
+    )
+    appcheck_token.add_argument(
+        "--cloud-project",
+        type=int,
+        help="cloud project number, for an app Google Play does not know",
+    )
+    appcheck_token.add_argument(
+        "--timeout-ms", type=int, help="give up if the app has not forked in this long"
     )
 
     shell = commands.add_parser(
@@ -684,6 +726,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     file=sys.stderr,
                 )
             print(build_header(args.package, hash_of_signer, key))
+            return 0
+
+        if args.command == "firebase-appcheck":
+            app = appcheck.FirebaseApp(
+                project_number=args.project_number,
+                app_id=args.app_id,
+                api_key=args.api_key,
+                package=args.package,
+            )
+            with device.connect() as connection:
+                uid = args.uid
+                if uid is None:
+                    uid = resolve_uid(connection, args.package, args.user)
+                issued = appcheck.token(
+                    connection,
+                    app,
+                    uid=uid,
+                    fingerprint=args.cert,
+                    cloud_project_number=args.cloud_project,
+                    timeout_ms=args.timeout_ms,
+                )
+            if args.verbose:
+                print(f"uid {uid}, ttl {issued.ttl_seconds}s", file=sys.stderr)
+            print(issued.token)
             return 0
 
         if args.command == "play-integrity":
