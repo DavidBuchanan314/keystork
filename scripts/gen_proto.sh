@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 #
-# Regenerate the Python protobuf bindings from proto/keystork.proto.
+# Regenerate the Python protobuf bindings from the .proto files in proto/.
 #
-# The generated module is committed (client/keystork/_proto/keystork_pb2.py) so
+# The generated modules are committed (client/keystork/_proto/*_pb2.py) so
 # that the client is pip-installable without a protoc on the machine. Run this
-# after editing the .proto and commit the result.
+# after editing a .proto and commit the result.
+#
+# keystork.proto is the wire protocol; spatula.proto is GMS's own schema, used
+# by keystork.util.spatula and not spoken by the daemon at all.
 #
 # Nothing else generated is committed, and for one reason: generated code and
 # the runtime it links against must be the same version. The daemon's C++ is
@@ -27,11 +30,12 @@ command -v protoc >/dev/null || {
 }
 
 mkdir -p "$out"
-protoc --proto_path="$root/proto" --python_out="$out" "$root/proto/keystork.proto"
+protoc --proto_path="$root/proto" --python_out="$out" \
+    "$root/proto/keystork.proto" "$root/proto/spatula.proto"
 
 
-# protoc emits a top-level `import`-free module here (keystork.proto has no
+# protoc emits top-level `import`-free modules here (neither .proto has
 # dependencies), so no import rewriting is needed.
 
-echo "wrote $out/keystork_pb2.py"
+echo "wrote $out/keystork_pb2.py $out/spatula_pb2.py"
 echo "protoc: $(protoc --version)"

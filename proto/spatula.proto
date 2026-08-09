@@ -1,0 +1,32 @@
+// GMS's spatula wire schema. Not keystork's protocol. Via https://github.com/microg/GmsCore/blob/9a206ae115d6f4d99300def2aea447332ac84260/play-services-core-proto/src/main/proto/appcert.proto
+//
+//   DeviceKey          - the on-device blob at
+//                        /data/user/0/com.google.android.gms/files/device_key
+//   SpatulaHeaderProto - the structure GMS base64-encodes into X-Goog-Spatula
+//
+// proto3 `optional` throughout, so explicitly-set zero fields are emitted on
+// the wire. deviceId is often 0 and GMS still writes it, so a mint that
+// dropped it would produce a header that differs from the real one.
+
+syntax = "proto3";
+
+package gmscore.spatula;
+
+message DeviceKey {
+  optional uint64 keyId     = 1;
+  optional uint64 deviceId  = 3;
+  optional bytes  macSecret = 4;
+  optional bytes  keyCert   = 5;
+}
+
+message SpatulaHeaderProto {
+  message PackageInfo {
+    optional string packageName            = 1;
+    optional string packageCertificateHash = 3;
+  }
+  optional PackageInfo packageInfo = 1;
+  optional bytes       hmac        = 2;
+  optional uint64      deviceId    = 3;
+  optional uint64      keyId       = 4;
+  optional bytes       keyCert     = 5;
+}

@@ -33,7 +33,14 @@ from .session import (
     KeystoreSession,
     nonce_length,
 )
-from .util.packages import resolve_uid
+from .util.packages import (
+    PACKAGES_XML,
+    cert_hash,
+    package_cert_hash,
+    resolve_uid,
+    signing_cert,
+)
+from .util.spatula import build_header, device_key
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -279,6 +286,42 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "packages",
         help="list the device's packages and the UIDs they run as",
+    )
+
+    hashing = commands.add_parser(
+        "cert-hash",
+        help="show the signing certificate hash of an installed package",
+        description="base64(SHA1(signing-cert DER)), the name Google's APIs know a signer "
+        f"by. Read from {PACKAGES_XML} as root, via the device's own abx2xml when that file "
+        "is binary XML.",
+    )
+    hashing.add_argument("package", help="package name, e.g. com.google.android.GoogleCamera")
+    hashing.add_argument(
+        "--der", metavar="FILE", help="also write the certificate itself (DER) to FILE"
+    )
+
+    spatula_header = commands.add_parser(
+        "spatula",
+        help="mint an X-Goog-Spatula header for an installed package",
+        description="Computes offline what GMS would compute in-process: an HMAC over the "
+        "package's name and signing certificate hash, keyed by the device key GMS was "
+        "provisioned with, wrapped in GMS's own proto and base64'd. The app never runs -- "
+        "everything this needs is a root-readable file. Prints the header value.",
+    )
+    spatula_header.add_argument("package", help="the package to mint a header for")
+    spatula_header.add_argument(
+        "--user",
+        type=int,
+        default=0,
+        help="Android user id whose GMS holds the device key (default: 0)",
+    )
+    spatula_header.add_argument(
+        "--cert-hash",
+        metavar="BASE64",
+        help="use this packageCertificateHash instead of reading the signer from the device. "
+        "The device key signs whatever name and hash it is given, so this is how to mint a "
+        "header for a package that is not installed here -- take the hash from that app's APK "
+        "(the first certificate in its v2/v3 signing block) or from a device that has it",
     )
 
     shell = commands.add_parser(
@@ -608,6 +651,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 packages = connection.packages()
             for name in sorted(packages):
                 print(f"{packages[name]}\t{name}")
+            return 0
+
+        if args.command == "cert-hash":
+            with device.connect() as connection:
+                der = signing_cert(connection, args.package)
+            print(cert_hash(der))
+            if args.der:
+                _write_output(der, args.der, False)
+            return 0
+
+        if args.command == "spatula":
+            with device.connect() as connection:
+                key = device_key(connection, args.user)
+                hash_of_signer = args.cert_hash or package_cert_hash(connection, args.package)
+            if args.verbose:
+                print(
+                    f"keyId={key.keyId} deviceId={key.deviceId} certHash={hash_of_signer}",
+                    file=sys.stderr,
+                )
+            print(build_header(args.package, hash_of_signer, key))
             return 0
 
         if args.command == "integrity":

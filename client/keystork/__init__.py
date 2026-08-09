@@ -83,6 +83,7 @@ from .session import (
     nonce_length,
     operation_parameters,
 )
+from . import util
 from .util.packages import (
     PACKAGES_LIST,
     USER_OFFSET,
@@ -156,4 +157,5 @@ __all__ = [
     "parse_packages_list",
     "resolve_uid",
     "type_of_tag",
+    "util",
 ]
