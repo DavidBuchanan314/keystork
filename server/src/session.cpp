@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,9 +16,17 @@
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
 
+#include <aidl/android/hardware/security/keymint/KeyParameter.h>
+#include <aidl/android/hardware/security/keymint/SecurityLevel.h>
+#include <aidl/android/hardware/security/keymint/Tag.h>
+#include <aidl/android/hardware/security/keymint/TagType.h>
+#include <aidl/android/system/keystore2/CreateOperationResponse.h>
 #include <aidl/android/system/keystore2/Domain.h>
+#include <aidl/android/system/keystore2/IKeystoreOperation.h>
+#include <aidl/android/system/keystore2/IKeystoreSecurityLevel.h>
 #include <aidl/android/system/keystore2/IKeystoreService.h>
 #include <aidl/android/system/keystore2/KeyDescriptor.h>
+#include <aidl/android/system/keystore2/KeyEntryResponse.h>
 
 #include "framing.h"
 #include "keystork.pb.h"
@@ -29,9 +38,18 @@ namespace {
 
 namespace pb = ::keystork::v1;
 
+using ::aidl::android::hardware::security::keymint::KeyParameter;
+using ::aidl::android::hardware::security::keymint::KeyParameterValue;
+using ::aidl::android::hardware::security::keymint::SecurityLevel;
+using ::aidl::android::hardware::security::keymint::Tag;
+using ::aidl::android::hardware::security::keymint::TagType;
+using ::aidl::android::system::keystore2::CreateOperationResponse;
 using ::aidl::android::system::keystore2::Domain;
+using ::aidl::android::system::keystore2::IKeystoreOperation;
+using ::aidl::android::system::keystore2::IKeystoreSecurityLevel;
 using ::aidl::android::system::keystore2::IKeystoreService;
 using ::aidl::android::system::keystore2::KeyDescriptor;
+using ::aidl::android::system::keystore2::KeyEntryResponse;
 
 constexpr char kKeystoreServiceName[] = "android.system.keystore2.IKeystoreService/default";
 constexpr uint32_t kProtocolVersion = pb::PROTOCOL_VERSION_1;
@@ -104,6 +122,165 @@ void ToWire(const KeyDescriptor& in, pb::KeyDescriptor* out) {
   if (in.blob.has_value()) out->set_blob(in.blob->data(), in.blob->size());
 }
 
+KeyDescriptor FromWire(const pb::KeyDescriptor& in) {
+  KeyDescriptor out;
+  out.domain = static_cast<Domain>(in.domain());
+  out.nspace = in.nspace();
+  if (in.has_alias()) out.alias = in.alias();
+  if (in.has_blob()) {
+    out.blob = std::vector<uint8_t>(in.blob().begin(), in.blob().end());
+  }
+  return out;
+}
+
+// A KeyMint Tag carries its TagType in its top four bits, which is what selects
+// the arm of the KeyParameterValue union.
+int32_t TagTypeOf(int32_t tag) {
+  return static_cast<int32_t>(static_cast<uint32_t>(tag) & 0xf0000000u);
+}
+
+// The one place this daemon knows what a tag *means*, and only because it has
+// to: KeyParameterValue gives every KeyMint enum its own arm, so a tag of type
+// ENUM or ENUM_REP cannot be built from the tag type alone. Everything else is
+// derived structurally in FromWire below. A tag missing from this table still
+// reaches keystore2 -- as the generic `integer` arm, which keystore2 will
+// refuse if it was wrong -- rather than being rejected here.
+bool SetEnumValue(int32_t tag, int32_t value, KeyParameterValue* out) {
+  namespace km = ::aidl::android::hardware::security::keymint;
+  switch (static_cast<Tag>(tag)) {
+    case Tag::ALGORITHM:
+      out->set<KeyParameterValue::algorithm>(static_cast<km::Algorithm>(value));
+      return true;
+    case Tag::BLOCK_MODE:
+      out->set<KeyParameterValue::blockMode>(static_cast<km::BlockMode>(value));
+      return true;
+    case Tag::PADDING:
+      out->set<KeyParameterValue::paddingMode>(static_cast<km::PaddingMode>(value));
+      return true;
+    case Tag::DIGEST:
+    case Tag::RSA_OAEP_MGF_DIGEST:
+      out->set<KeyParameterValue::digest>(static_cast<km::Digest>(value));
+      return true;
+    case Tag::EC_CURVE:
+      out->set<KeyParameterValue::ecCurve>(static_cast<km::EcCurve>(value));
+      return true;
+    case Tag::ORIGIN:
+      out->set<KeyParameterValue::origin>(static_cast<km::KeyOrigin>(value));
+      return true;
+    case Tag::PURPOSE:
+      out->set<KeyParameterValue::keyPurpose>(static_cast<km::KeyPurpose>(value));
+      return true;
+    case Tag::USER_AUTH_TYPE:
+      out->set<KeyParameterValue::hardwareAuthenticatorType>(
+          static_cast<km::HardwareAuthenticatorType>(value));
+      return true;
+    case Tag::HARDWARE_TYPE:
+      out->set<KeyParameterValue::securityLevel>(static_cast<km::SecurityLevel>(value));
+      return true;
+    case Tag::ML_DSA_VARIANT:
+      out->set<KeyParameterValue::mlDsaVariant>(static_cast<km::MlDsaVariant>(value));
+      return true;
+    default:
+      return false;
+  }
+}
+
+KeyParameter FromWire(const pb::KeyParameter& in) {
+  KeyParameter out;
+  out.tag = static_cast<Tag>(in.tag());
+
+  switch (static_cast<TagType>(TagTypeOf(in.tag()))) {
+    case TagType::BOOL:
+      // KeyMint reads a BOOL tag's presence, not its value.
+      out.value.set<KeyParameterValue::boolValue>(in.bool_value());
+      break;
+    case TagType::ENUM:
+    case TagType::ENUM_REP:
+      if (!SetEnumValue(in.tag(), static_cast<int32_t>(in.integer()), &out.value)) {
+        out.value.set<KeyParameterValue::integer>(static_cast<int32_t>(in.integer()));
+      }
+      break;
+    case TagType::UINT:
+    case TagType::UINT_REP:
+      out.value.set<KeyParameterValue::integer>(static_cast<int32_t>(in.integer()));
+      break;
+    case TagType::ULONG:
+    case TagType::ULONG_REP:
+      out.value.set<KeyParameterValue::longInteger>(static_cast<int64_t>(in.long_integer()));
+      break;
+    case TagType::DATE:
+      out.value.set<KeyParameterValue::dateTime>(static_cast<int64_t>(in.long_integer()));
+      break;
+    case TagType::BYTES:
+    case TagType::BIGNUM:
+      out.value.set<KeyParameterValue::blob>(
+          std::vector<uint8_t>(in.blob().begin(), in.blob().end()));
+      break;
+    case TagType::INVALID:
+      break;
+  }
+  return out;
+}
+
+void ToWire(const KeyParameter& in, pb::KeyParameter* out) {
+  out->set_tag(static_cast<int32_t>(in.tag));
+
+  switch (in.value.getTag()) {
+    case KeyParameterValue::boolValue:
+      out->set_bool_value(in.value.get<KeyParameterValue::boolValue>());
+      break;
+    case KeyParameterValue::integer:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::integer>()));
+      break;
+    case KeyParameterValue::algorithm:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::algorithm>()));
+      break;
+    case KeyParameterValue::blockMode:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::blockMode>()));
+      break;
+    case KeyParameterValue::paddingMode:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::paddingMode>()));
+      break;
+    case KeyParameterValue::digest:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::digest>()));
+      break;
+    case KeyParameterValue::ecCurve:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::ecCurve>()));
+      break;
+    case KeyParameterValue::origin:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::origin>()));
+      break;
+    case KeyParameterValue::keyPurpose:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::keyPurpose>()));
+      break;
+    case KeyParameterValue::hardwareAuthenticatorType:
+      out->set_integer(
+          static_cast<uint32_t>(in.value.get<KeyParameterValue::hardwareAuthenticatorType>()));
+      break;
+    case KeyParameterValue::securityLevel:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::securityLevel>()));
+      break;
+    case KeyParameterValue::mlDsaVariant:
+      out->set_integer(static_cast<uint32_t>(in.value.get<KeyParameterValue::mlDsaVariant>()));
+      break;
+    case KeyParameterValue::longInteger:
+      out->set_long_integer(
+          static_cast<uint64_t>(in.value.get<KeyParameterValue::longInteger>()));
+      break;
+    case KeyParameterValue::dateTime:
+      out->set_long_integer(static_cast<uint64_t>(in.value.get<KeyParameterValue::dateTime>()));
+      break;
+    case KeyParameterValue::blob: {
+      const auto& blob = in.value.get<KeyParameterValue::blob>();
+      out->set_blob(blob.data(), blob.size());
+      break;
+    }
+    case KeyParameterValue::invalid:
+      // No arm set: the tag travels alone, which is what KeyMint sent.
+      break;
+  }
+}
+
 // One ListRequest is exactly one keystore2 call. The client owns the capability
 // table that decides between the two, and owns the pagination loop for the
 // batched form; the server just relays.
@@ -135,6 +312,266 @@ void HandleList(IKeystoreService* service, const pb::ListRequest& request, pb::R
 
   auto* list = response->mutable_list();
   for (const auto& entry : entries) ToWire(entry, list->add_entries());
+}
+
+// getKeyEntry also hands back an IKeystoreSecurityLevel; that handle stays here
+// (§3.6) and only the metadata goes on the wire.
+void HandleGetKeyEntry(IKeystoreService* service, const pb::GetKeyEntryRequest& request,
+                       pb::Response* response) {
+  KeyEntryResponse entry;
+  const auto status = service->getKeyEntry(FromWire(request.key()), &entry);
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+
+  auto* metadata = response->mutable_get_key_entry()->mutable_metadata();
+  ToWire(entry.metadata.key, metadata->mutable_key());
+  metadata->set_key_security_level(static_cast<int32_t>(entry.metadata.keySecurityLevel));
+  metadata->set_modification_time_ms(entry.metadata.modificationTimeMs);
+
+  for (const auto& authorization : entry.metadata.authorizations) {
+    auto* out = metadata->add_authorizations();
+    out->set_security_level(static_cast<int32_t>(authorization.securityLevel));
+    ToWire(authorization.keyParameter, out->mutable_parameter());
+  }
+
+  if (entry.metadata.certificate.has_value()) {
+    metadata->set_certificate(entry.metadata.certificate->data(),
+                              entry.metadata.certificate->size());
+  }
+  if (entry.metadata.certificateChain.has_value()) {
+    metadata->set_certificate_chain(entry.metadata.certificateChain->data(),
+                                    entry.metadata.certificateChain->size());
+  }
+}
+
+// Everything a session carries between round-trips. The operation handle is the
+// only real state: keystore2 owns the operation, this is the live Binder proxy
+// to it, and there is at most one because requests are synchronous. If the
+// client vanishes the child dies with it, keystore2 sees the Binder death, and
+// the operation is reclaimed -- there is nothing to clean up here.
+struct SessionState {
+  std::shared_ptr<IKeystoreService> service;
+  std::shared_ptr<IKeystoreOperation> operation;
+  std::map<int32_t, std::shared_ptr<IKeystoreSecurityLevel>> security_levels;
+};
+
+std::vector<uint8_t> Bytes(const std::string& in) {
+  return std::vector<uint8_t>(in.begin(), in.end());
+}
+
+// getSecurityLevel is a round-trip returning a sub-interface. The handle is
+// never exposed on the wire (§3.6), and a session uses one or two levels at
+// most, so it is fetched once and kept.
+std::shared_ptr<IKeystoreSecurityLevel> SecurityLevelFor(SessionState* session, int32_t level,
+                                                         ::ndk::ScopedAStatus* status) {
+  const auto cached = session->security_levels.find(level);
+  if (cached != session->security_levels.end()) return cached->second;
+
+  std::shared_ptr<IKeystoreSecurityLevel> handle;
+  *status = session->service->getSecurityLevel(static_cast<SecurityLevel>(level), &handle);
+  if (!status->isOk() || handle == nullptr) return nullptr;
+
+  session->security_levels[level] = handle;
+  return handle;
+}
+
+// createOperation, shared by run_operation and op_begin. On failure it fills
+// `response` with the error and returns null; `begun` is a local the caller
+// copies into the response only once the whole call has succeeded, so a later
+// failure can replace the response body wholesale.
+std::shared_ptr<IKeystoreOperation> BeginOperation(SessionState* session,
+                                                   const pb::OperationStart& start,
+                                                   pb::OperationBegun* begun,
+                                                   pb::Response* response) {
+  ::ndk::ScopedAStatus status;
+  auto level = SecurityLevelFor(session, start.security_level(), &status);
+  if (level == nullptr) {
+    if (!status.isOk()) {
+      FillError(status, response->mutable_error());
+    } else {
+      FillProtocolError("keystore2 returned no security level for " +
+                            std::to_string(start.security_level()),
+                        response->mutable_error());
+    }
+    return nullptr;
+  }
+
+  std::vector<KeyParameter> parameters;
+  parameters.reserve(static_cast<size_t>(start.parameters_size()));
+  for (const auto& parameter : start.parameters()) parameters.push_back(FromWire(parameter));
+
+  CreateOperationResponse created;
+  status = level->createOperation(FromWire(start.key()), parameters, start.forced(), &created);
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return nullptr;
+  }
+  if (created.iOperation == nullptr) {
+    FillProtocolError("keystore2 accepted the request but returned no operation",
+                      response->mutable_error());
+    return nullptr;
+  }
+
+  if (created.parameters.has_value()) {
+    for (const auto& parameter : created.parameters->keyParameter) {
+      ToWire(parameter, begun->add_parameters());
+    }
+  }
+  if (created.operationChallenge.has_value()) {
+    begun->set_operation_challenge(created.operationChallenge->challenge);
+  }
+  if (created.upgradedBlob.has_value()) {
+    begun->set_upgraded_blob(created.upgradedBlob->data(), created.upgradedBlob->size());
+  }
+  return created.iOperation;
+}
+
+// createOperation + updateAad + update + finish, in one round-trip. The whole
+// input is fed through update() and finish() takes only the signature, which is
+// the conventional shape and keeps one huge parcel off the Binder transaction
+// even when the client sends everything at once.
+void HandleRunOperation(SessionState* session, const pb::RunOperationRequest& request,
+                        pb::Response* response) {
+  pb::OperationBegun begun;
+  auto operation = BeginOperation(session, request.start(), &begun, response);
+  if (operation == nullptr) return;
+
+  // Anything that fails before finish() leaves a live operation behind, and
+  // keystore2 has a limited number of slots, so it is given back immediately
+  // rather than at session teardown.
+  const auto fail = [&](const ::ndk::ScopedAStatus& status) {
+    (void)operation->abort();
+    FillError(status, response->mutable_error());
+  };
+
+  std::string output;
+  ::ndk::ScopedAStatus status;
+
+  if (request.has_aad()) {
+    status = operation->updateAad(Bytes(request.aad()));
+    if (!status.isOk()) return fail(status);
+  }
+
+  if (request.has_input()) {
+    std::optional<std::vector<uint8_t>> chunk;
+    status = operation->update(Bytes(request.input()), &chunk);
+    if (!status.isOk()) return fail(status);
+    if (chunk.has_value()) output.append(chunk->begin(), chunk->end());
+  }
+
+  std::optional<std::vector<uint8_t>> signature;
+  if (request.has_signature()) signature = Bytes(request.signature());
+
+  std::optional<std::vector<uint8_t>> final_output;
+  status = operation->finish(std::nullopt, signature, &final_output);
+  if (!status.isOk()) {
+    // finish() consumes the operation whether or not it succeeded; aborting now
+    // would just produce a second, more confusing error.
+    FillError(status, response->mutable_error());
+    return;
+  }
+  if (final_output.has_value()) output.append(final_output->begin(), final_output->end());
+
+  auto* result = response->mutable_run_operation();
+  *result->mutable_begun() = begun;
+  result->set_output(output);
+}
+
+void HandleOpBegin(SessionState* session, const pb::OpBeginRequest& request,
+                   pb::Response* response) {
+  if (session->operation != nullptr) {
+    FillProtocolError("an operation is already open on this session; finish or abort it first",
+                      response->mutable_error());
+    return;
+  }
+
+  pb::OperationBegun begun;
+  auto operation = BeginOperation(session, request.start(), &begun, response);
+  if (operation == nullptr) return;
+
+  session->operation = operation;
+  *response->mutable_op_begin()->mutable_begun() = begun;
+}
+
+// The session's operation is implicit, so every op_* call but begin has to say
+// so when there is nothing open.
+IKeystoreOperation* LiveOperation(SessionState* session, pb::Response* response) {
+  if (session->operation == nullptr) {
+    FillProtocolError("no operation is open on this session", response->mutable_error());
+    return nullptr;
+  }
+  return session->operation.get();
+}
+
+void HandleOpUpdateAad(SessionState* session, const pb::OpUpdateAadRequest& request,
+                       pb::Response* response) {
+  auto* operation = LiveOperation(session, response);
+  if (operation == nullptr) return;
+
+  const auto status = operation->updateAad(Bytes(request.aad()));
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+  response->mutable_op_update_aad();
+}
+
+void HandleOpUpdate(SessionState* session, const pb::OpUpdateRequest& request,
+                    pb::Response* response) {
+  auto* operation = LiveOperation(session, response);
+  if (operation == nullptr) return;
+
+  std::optional<std::vector<uint8_t>> chunk;
+  const auto status = operation->update(Bytes(request.input()), &chunk);
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+
+  auto* result = response->mutable_op_update();
+  // KeyMint is free to buffer, so no output on an update is ordinary.
+  if (chunk.has_value()) result->set_output(chunk->data(), chunk->size());
+}
+
+void HandleOpFinish(SessionState* session, const pb::OpFinishRequest& request,
+                    pb::Response* response) {
+  auto* operation = LiveOperation(session, response);
+  if (operation == nullptr) return;
+
+  std::optional<std::vector<uint8_t>> input;
+  if (request.has_input()) input = Bytes(request.input());
+  std::optional<std::vector<uint8_t>> signature;
+  if (request.has_signature()) signature = Bytes(request.signature());
+
+  std::optional<std::vector<uint8_t>> output;
+  const auto status = operation->finish(input, signature, &output);
+
+  // finish() ends the operation either way, so the session lets go of it before
+  // reporting anything.
+  session->operation.reset();
+
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+  auto* result = response->mutable_op_finish();
+  if (output.has_value()) result->set_output(output->data(), output->size());
+}
+
+void HandleOpAbort(SessionState* session, pb::Response* response) {
+  auto* operation = LiveOperation(session, response);
+  if (operation == nullptr) return;
+
+  const auto status = operation->abort();
+  session->operation.reset();
+
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+  response->mutable_op_abort();
 }
 
 bool SendFrame(int fd, const google::protobuf::MessageLite& message) {
@@ -217,8 +654,9 @@ std::shared_ptr<IKeystoreService> Establish(int fd) {
 }  // namespace
 
 int RunSession(int fd) {
-  auto service = Establish(fd);
-  if (service == nullptr) return 1;
+  SessionState session;
+  session.service = Establish(fd);
+  if (session.service == nullptr) return 1;
 
   for (;;) {
     std::string encoded;
@@ -236,7 +674,28 @@ int RunSession(int fd) {
     } else {
       switch (request.body_case()) {
         case pb::Request::kList:
-          HandleList(service.get(), request.list(), &response);
+          HandleList(session.service.get(), request.list(), &response);
+          break;
+        case pb::Request::kGetKeyEntry:
+          HandleGetKeyEntry(session.service.get(), request.get_key_entry(), &response);
+          break;
+        case pb::Request::kRunOperation:
+          HandleRunOperation(&session, request.run_operation(), &response);
+          break;
+        case pb::Request::kOpBegin:
+          HandleOpBegin(&session, request.op_begin(), &response);
+          break;
+        case pb::Request::kOpUpdateAad:
+          HandleOpUpdateAad(&session, request.op_update_aad(), &response);
+          break;
+        case pb::Request::kOpUpdate:
+          HandleOpUpdate(&session, request.op_update(), &response);
+          break;
+        case pb::Request::kOpFinish:
+          HandleOpFinish(&session, request.op_finish(), &response);
+          break;
+        case pb::Request::kOpAbort:
+          HandleOpAbort(&session, &response);
           break;
         case pb::Request::BODY_NOT_SET:
           // Also what a newer client's unimplemented RPC looks like here: its

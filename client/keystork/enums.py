@@ -207,3 +207,235 @@ class BinderException(IntEnum):
     EX_SERVICE_SPECIFIC = -8
     EX_PARCELABLE = -9
     EX_TRANSACTION_FAILED = -129
+
+
+class Algorithm(IntEnum):
+    """``android.hardware.security.keymint.Algorithm``."""
+
+    RSA = 1
+    EC = 3
+    ML_DSA = 4
+    AES = 32
+    TRIPLE_DES = 33
+    HMAC = 128
+
+
+class BlockMode(IntEnum):
+    """``android.hardware.security.keymint.BlockMode``."""
+
+    ECB = 1
+    CBC = 2
+    CTR = 3
+    GCM = 32
+
+
+class PaddingMode(IntEnum):
+    """``android.hardware.security.keymint.PaddingMode``."""
+
+    NONE = 1
+    RSA_OAEP = 2
+    RSA_PSS = 3
+    RSA_PKCS1_1_5_ENCRYPT = 4
+    RSA_PKCS1_1_5_SIGN = 5
+    PKCS7 = 64
+
+
+class Digest(IntEnum):
+    """``android.hardware.security.keymint.Digest``."""
+
+    NONE = 0
+    MD5 = 1
+    SHA1 = 2
+    SHA_2_224 = 3
+    SHA_2_256 = 4
+    SHA_2_384 = 5
+    SHA_2_512 = 6
+
+
+class KeyPurpose(IntEnum):
+    """``android.hardware.security.keymint.KeyPurpose``.
+
+    An operation names exactly one of these in ``Tag.PURPOSE``; the key must
+    have been generated allowing it.
+    """
+
+    ENCRYPT = 0
+    DECRYPT = 1
+    SIGN = 2
+    VERIFY = 3
+    WRAP_KEY = 5
+    AGREE_KEY = 6
+    ATTEST_KEY = 7
+
+
+class EcCurve(IntEnum):
+    """``android.hardware.security.keymint.EcCurve``."""
+
+    P_224 = 0
+    P_256 = 1
+    P_384 = 2
+    P_521 = 3
+    CURVE_25519 = 4
+
+
+class KeyOrigin(IntEnum):
+    """``android.hardware.security.keymint.KeyOrigin``."""
+
+    GENERATED = 0
+    DERIVED = 1
+    IMPORTED = 2
+    RESERVED = 3
+    SECURELY_IMPORTED = 4
+
+
+class HardwareAuthenticatorType(IntEnum):
+    """``android.hardware.security.keymint.HardwareAuthenticatorType``."""
+
+    NONE = 0
+    PASSWORD = 1
+    FINGERPRINT = 2
+    ANY = -1
+
+
+class MlDsaVariant(IntEnum):
+    """``android.hardware.security.keymint.MlDsaVariant``."""
+
+    ML_DSA_65 = 1
+    ML_DSA_87 = 2
+
+
+class SecurityLevel(IntEnum):
+    """``android.hardware.security.keymint.SecurityLevel``.
+
+    Which backend to ask keystore2 for. ``TRUSTED_ENVIRONMENT`` is the ordinary
+    hardware-backed choice; ``STRONGBOX`` needs a device that has one.
+    """
+
+    SOFTWARE = 0
+    TRUSTED_ENVIRONMENT = 1
+    STRONGBOX = 2
+    KEYSTORE = 100
+
+
+class TagType(IntEnum):
+    """``android.hardware.security.keymint.TagType``.
+
+    A KeyMint ``Tag`` carries its type in its top four bits, so
+    :func:`type_of_tag` recovers this from any tag -- including one these tables
+    have never seen -- and that is what decides how a parameter is put on the
+    wire.
+    """
+
+    INVALID = 0
+    ENUM = 0x10000000
+    ENUM_REP = 0x20000000
+    UINT = 0x30000000
+    UINT_REP = 0x40000000
+    ULONG = 0x50000000
+    DATE = 0x60000000
+    BOOL = 0x70000000
+    BIGNUM = -0x80000000
+    BYTES = -0x70000000
+    ULONG_REP = -0x60000000
+
+
+class Tag(IntEnum):
+    """``android.hardware.security.keymint.Tag``, as of KeyMint V5."""
+
+    INVALID = 0
+    PURPOSE = 536870913
+    ALGORITHM = 268435458
+    KEY_SIZE = 805306371
+    BLOCK_MODE = 536870916
+    DIGEST = 536870917
+    PADDING = 536870918
+    CALLER_NONCE = 1879048199
+    MIN_MAC_LENGTH = 805306376
+    EC_CURVE = 268435466
+    ML_DSA_VARIANT = 268435467
+    RSA_PUBLIC_EXPONENT = 1342177480
+    INCLUDE_UNIQUE_ID = 1879048394
+    RSA_OAEP_MGF_DIGEST = 536871115
+    BOOTLOADER_ONLY = 1879048494
+    ROLLBACK_RESISTANCE = 1879048495
+    HARDWARE_TYPE = 268435760
+    EARLY_BOOT_ONLY = 1879048497
+    ACTIVE_DATETIME = 1610613136
+    ORIGINATION_EXPIRE_DATETIME = 1610613137
+    USAGE_EXPIRE_DATETIME = 1610613138
+    MIN_SECONDS_BETWEEN_OPS = 805306771
+    MAX_USES_PER_BOOT = 805306772
+    USAGE_COUNT_LIMIT = 805306773
+    USER_ID = 805306869
+    USER_SECURE_ID = -1610612234
+    NO_AUTH_REQUIRED = 1879048695
+    USER_AUTH_TYPE = 268435960
+    AUTH_TIMEOUT = 805306873
+    ALLOW_WHILE_ON_BODY = 1879048698
+    TRUSTED_USER_PRESENCE_REQUIRED = 1879048699
+    TRUSTED_CONFIRMATION_REQUIRED = 1879048700
+    UNLOCKED_DEVICE_REQUIRED = 1879048701
+    APPLICATION_ID = -1879047591
+    APPLICATION_DATA = -1879047492
+    CREATION_DATETIME = 1610613437
+    ORIGIN = 268436158
+    ROOT_OF_TRUST = -1879047488
+    OS_VERSION = 805307073
+    OS_PATCHLEVEL = 805307074
+    UNIQUE_ID = -1879047485
+    ATTESTATION_CHALLENGE = -1879047484
+    ATTESTATION_APPLICATION_ID = -1879047483
+    ATTESTATION_ID_BRAND = -1879047482
+    ATTESTATION_ID_DEVICE = -1879047481
+    ATTESTATION_ID_PRODUCT = -1879047480
+    ATTESTATION_ID_SERIAL = -1879047479
+    ATTESTATION_ID_IMEI = -1879047478
+    ATTESTATION_ID_MEID = -1879047477
+    ATTESTATION_ID_MANUFACTURER = -1879047476
+    ATTESTATION_ID_MODEL = -1879047475
+    VENDOR_PATCHLEVEL = 805307086
+    BOOT_PATCHLEVEL = 805307087
+    DEVICE_UNIQUE_ATTESTATION = 1879048912
+    IDENTITY_CREDENTIAL_KEY = 1879048913
+    STORAGE_KEY = 1879048914
+    ATTESTATION_ID_SECOND_IMEI = -1879047469
+    MODULE_HASH = -1879047468
+    ASSOCIATED_DATA = -1879047192
+    NONCE = -1879047191
+    MAC_LENGTH = 805307371
+    RESET_SINCE_ID_ROTATION = 1879049196
+    CONFIRMATION_TOKEN = -1879047187
+    CERTIFICATE_SERIAL = -2147482642
+    CERTIFICATE_SUBJECT = -1879047185
+    CERTIFICATE_NOT_BEFORE = 1610613744
+    CERTIFICATE_NOT_AFTER = 1610613745
+    MAX_BOOT_LEVEL = 805307378
+
+
+#: The KeyMint enum each ENUM/ENUM_REP tag draws its values from. Only these
+#: tags need it: every other tag's type is recoverable from the tag itself.
+TAG_ENUMS = {
+    Tag.ALGORITHM: Algorithm,
+    Tag.BLOCK_MODE: BlockMode,
+    Tag.PADDING: PaddingMode,
+    Tag.DIGEST: Digest,
+    Tag.RSA_OAEP_MGF_DIGEST: Digest,
+    Tag.EC_CURVE: EcCurve,
+    Tag.ORIGIN: KeyOrigin,
+    Tag.PURPOSE: KeyPurpose,
+    Tag.USER_AUTH_TYPE: HardwareAuthenticatorType,
+    Tag.HARDWARE_TYPE: SecurityLevel,
+    Tag.ML_DSA_VARIANT: MlDsaVariant,
+}
+
+
+def type_of_tag(tag: int) -> TagType:
+    """The :class:`TagType` encoded in `tag`'s top four bits.
+
+    Works for tags these tables have never seen, which is the point: a new
+    KeyMint tag still round-trips without a client update.
+    """
+    masked = tag & 0xF0000000
+    if masked >= 0x80000000:
+        masked -= 0x100000000
+    return TagType(masked)

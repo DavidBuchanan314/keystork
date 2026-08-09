@@ -120,6 +120,37 @@ message KeyDescriptor {
   optional bytes blob = 4;
 }
 
+// android.hardware.security.keymint.KeyParameter as a generic tagged value.
+//
+// A KeyMint Tag encodes its own TagType in its top four bits, so this one shape
+// covers every parameter that exists and every one that ever will. The client
+// names the tags; the server only picks which arm of KeyMint's
+// KeyParameterValue union to fill, which it derives from those top four bits.
+//
+// Which arm to use is therefore *not* a naming decision, with one unavoidable
+// exception: KeyParameterValue gives each enum its own arm (algorithm,
+// blockMode, digest, ...), so a tag of type ENUM/ENUM_REP needs a tag-to-arm
+// table on the server. That table is in server/src/session.cpp and is the only
+// place the daemon knows what a tag means.
+message KeyParameter {
+  // A KeyMint Tag. Raw, and never validated.
+  int32 tag = 1;
+
+  // Which arm is set must match the tag's TagType:
+  //   BOOL                     -> bool_value (KeyMint reads presence, not value)
+  //   ENUM, ENUM_REP, UINT,
+  //   UINT_REP                 -> integer
+  //   ULONG, ULONG_REP, DATE   -> long_integer
+  //   BYTES, BIGNUM            -> blob
+  // A mismatch is not rejected here; keystore2 will refuse it.
+  oneof value {
+    bool bool_value = 2;
+    uint32 integer = 3;
+    uint64 long_integer = 4;
+    bytes blob = 5;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
@@ -147,12 +178,176 @@ message ListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// get_key_entry
+// ---------------------------------------------------------------------------
+
+// One entry of a key's authorization list: a KeyParameter plus which security
+// level enforces it. A tag enforced by the TEE and the same tag enforced by
+// keystore2 itself are different guarantees, so the level travels with it.
+message Authorization {
+  int32 security_level = 1;
+  KeyParameter parameter = 2;
+}
+
+// android.system.keystore2.KeyMetadata. The IKeystoreSecurityLevel handle that
+// comes back alongside it stays on the device.
+message KeyMetadata {
+  KeyDescriptor key = 1;
+
+  // KeyMint SecurityLevel the key itself lives at.
+  int32 key_security_level = 2;
+
+  // How the key was generated: algorithm, permitted digests and paddings, key
+  // size, auth requirements. This is what lets a client pick operation
+  // parameters instead of being told them.
+  repeated Authorization authorizations = 3;
+
+  // Leaf certificate, DER. Absent for symmetric keys.
+  optional bytes certificate = 4;
+
+  // The rest of the chain, DER certificates concatenated. Splitting it is the
+  // client's job.
+  optional bytes certificate_chain = 5;
+
+  int64 modification_time_ms = 6;
+}
+
+message GetKeyEntryRequest {
+  KeyDescriptor key = 1;
+}
+
+message GetKeyEntryResponse {
+  KeyMetadata metadata = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Operations (encrypt / decrypt / sign / verify)
+//
+// keystore2's createOperation hands back a live Binder handle to an operation
+// object. The session's child holds that handle across round-trips, so the same
+// machinery serves two shapes:
+//
+//   run_operation  -- create + updateAad + update + finish in one round-trip.
+//   op_begin ...   -- the same steps as separate RPCs, for input too large to
+//                     buffer into one message, or for incremental AAD.
+//
+// Requests in a session are synchronous, so at most one operation is ever in
+// flight and the active one is implicit -- there are no operation IDs on the
+// wire. If the client disconnects mid-operation the child dies, keystore2 sees
+// the Binder death, and the operation is pruned.
+//
+// Auth-bound keys are out of scope: a HardwareAuthToken arrives through
+// IKeystoreAuthorization, a service this daemon does not speak. The
+// operation_challenge below is surfaced so a client can *see* that a key wanted
+// one, not so it can satisfy it.
+// ---------------------------------------------------------------------------
+
+// The operation to create. Shared by run_operation and op_begin.
+message OperationStart {
+  KeyDescriptor key = 1;
+
+  // KeyMint operation parameters: PURPOSE, plus whatever the key needs
+  // (BLOCK_MODE, PADDING, DIGEST, MAC_LENGTH, NONCE, ...). Passed through as
+  // sent.
+  repeated KeyParameter parameters = 2;
+
+  // keystore2 prunes a lower-priority operation to make room when true.
+  bool forced = 3;
+
+  // KeyMint SecurityLevel to ask IKeystoreService.getSecurityLevel for:
+  // SOFTWARE=0, TRUSTED_ENVIRONMENT=1, STRONGBOX=2, KEYSTORE=100. The
+  // sub-interface handle itself is never exposed on the wire.
+  int32 security_level = 4;
+}
+
+// What createOperation returned, minus the Binder handle the server keeps.
+message OperationBegun {
+  // KeyMint's own parameters for the operation -- notably the NONCE it
+  // generated when the caller did not supply one.
+  repeated KeyParameter parameters = 1;
+
+  // Set when the key is auth-bound: the challenge an auth token would have to
+  // carry. Present means the operation will fail at finish without one.
+  optional int64 operation_challenge = 2;
+
+  // keystore2 re-wrapped the key blob (e.g. after an OS upgrade). A client
+  // holding a Domain::BLOB descriptor should replace it with this.
+  optional bytes upgraded_blob = 3;
+}
+
+message RunOperationRequest {
+  OperationStart start = 1;
+
+  // AEAD associated data, sent before any input. Kept separate from `input`
+  // because updateAad and update are different calls.
+  optional bytes aad = 2;
+
+  // The whole crypto input. Absent is legal: finish() alone is a valid
+  // operation for, say, an empty-message signature.
+  optional bytes input = 3;
+
+  // KeyPurpose::VERIFY only: the signature to check.
+  optional bytes signature = 4;
+}
+
+message RunOperationResponse {
+  OperationBegun begun = 1;
+
+  // Everything update() and finish() produced, concatenated in order.
+  optional bytes output = 2;
+}
+
+message OpBeginRequest {
+  OperationStart start = 1;
+}
+
+message OpBeginResponse {
+  OperationBegun begun = 1;
+}
+
+message OpUpdateAadRequest {
+  bytes aad = 1;
+}
+
+message OpUpdateAadResponse {}
+
+message OpUpdateRequest {
+  bytes input = 1;
+}
+
+message OpUpdateResponse {
+  // KeyMint may buffer instead of emitting on every update, so an absent
+  // output is normal rather than an error.
+  optional bytes output = 1;
+}
+
+message OpFinishRequest {
+  optional bytes input = 1;
+  optional bytes signature = 2;
+}
+
+message OpFinishResponse {
+  optional bytes output = 1;
+}
+
+message OpAbortRequest {}
+
+message OpAbortResponse {}
+
+// ---------------------------------------------------------------------------
 // Envelopes
 // ---------------------------------------------------------------------------
 
 message Request {
   oneof body {
     ListRequest list = 1;
+    GetKeyEntryRequest get_key_entry = 8;
+    RunOperationRequest run_operation = 2;
+    OpBeginRequest op_begin = 3;
+    OpUpdateAadRequest op_update_aad = 4;
+    OpUpdateRequest op_update = 5;
+    OpFinishRequest op_finish = 6;
+    OpAbortRequest op_abort = 7;
   }
 }
 
@@ -160,5 +355,12 @@ message Response {
   oneof body {
     Error error = 1;
     ListResponse list = 2;
+    GetKeyEntryResponse get_key_entry = 9;
+    RunOperationResponse run_operation = 3;
+    OpBeginResponse op_begin = 4;
+    OpUpdateAadResponse op_update_aad = 5;
+    OpUpdateResponse op_update = 6;
+    OpFinishResponse op_finish = 7;
+    OpAbortResponse op_abort = 8;
   }
 }

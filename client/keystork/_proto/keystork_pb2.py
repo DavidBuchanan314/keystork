@@ -15,7 +15,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ekeystork.proto\x12\x0bkeystork.v1\"\xc6\x01\n\x05\x45rror\x12%\n\x04kind\x18\x01 \x01(\x0e\x32\x17.keystork.v1.Error.Kind\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x16\n\x0e\x65xception_code\x18\x04 \x01(\x05\"_\n\x04Kind\x12\x14\n\x10KIND_UNSPECIFIED\x10\x00\x12\x14\n\x10SERVICE_SPECIFIC\x10\x01\x12\x0f\n\x0bTRANSACTION\x10\x02\x12\x0c\n\x08PROTOCOL\x10\x03\x12\x0c\n\x08IDENTITY\x10\x04\"2\n\tHandshake\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x0b\n\x03uid\x18\x02 \x01(\r\"o\n\x0cHandshakeAck\x12!\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.Error\x12\x18\n\x10protocol_version\x18\x02 \x01(\r\x12\"\n\x1akeystore_interface_version\x18\x03 \x01(\x05\"i\n\rKeyDescriptor\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x12\n\x05\x61lias\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x11\n\x04\x62lob\x18\x04 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_aliasB\x07\n\x05_blob\"x\n\x0bListRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x0f\n\x07\x62\x61tched\x18\x03 \x01(\x08\x12 \n\x13starting_past_alias\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x16\n\x14_starting_past_alias\";\n\x0cListResponse\x12+\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1a.keystork.v1.KeyDescriptor\";\n\x07Request\x12(\n\x04list\x18\x01 \x01(\x0b\x32\x18.keystork.v1.ListRequestH\x00\x42\x06\n\x04\x62ody\"b\n\x08Response\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12)\n\x04list\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ListResponseH\x00\x42\x06\n\x04\x62ody*K\n\x0fProtocolVersion\x12 \n\x1cPROTOCOL_VERSION_UNSPECIFIED\x10\x00\x12\x16\n\x12PROTOCOL_VERSION_1\x10\x01\x42\x02H\x03\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ekeystork.proto\x12\x0bkeystork.v1\"\xc6\x01\n\x05\x45rror\x12%\n\x04kind\x18\x01 \x01(\x0e\x32\x17.keystork.v1.Error.Kind\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x16\n\x0e\x65xception_code\x18\x04 \x01(\x05\"_\n\x04Kind\x12\x14\n\x10KIND_UNSPECIFIED\x10\x00\x12\x14\n\x10SERVICE_SPECIFIC\x10\x01\x12\x0f\n\x0bTRANSACTION\x10\x02\x12\x0c\n\x08PROTOCOL\x10\x03\x12\x0c\n\x08IDENTITY\x10\x04\"2\n\tHandshake\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x0b\n\x03uid\x18\x02 \x01(\r\"o\n\x0cHandshakeAck\x12!\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.Error\x12\x18\n\x10protocol_version\x18\x02 \x01(\r\x12\"\n\x1akeystore_interface_version\x18\x03 \x01(\x05\"i\n\rKeyDescriptor\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x12\n\x05\x61lias\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x11\n\x04\x62lob\x18\x04 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_aliasB\x07\n\x05_blob\"u\n\x0cKeyParameter\x12\x0b\n\x03tag\x18\x01 \x01(\x05\x12\x14\n\nbool_value\x18\x02 \x01(\x08H\x00\x12\x11\n\x07integer\x18\x03 \x01(\rH\x00\x12\x16\n\x0clong_integer\x18\x04 \x01(\x04H\x00\x12\x0e\n\x04\x62lob\x18\x05 \x01(\x0cH\x00\x42\x07\n\x05value\"x\n\x0bListRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\x05\x12\x0e\n\x06nspace\x18\x02 \x01(\x03\x12\x0f\n\x07\x62\x61tched\x18\x03 \x01(\x08\x12 \n\x13starting_past_alias\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x16\n\x14_starting_past_alias\";\n\x0cListResponse\x12+\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"U\n\rAuthorization\x12\x16\n\x0esecurity_level\x18\x01 \x01(\x05\x12,\n\tparameter\x18\x02 \x01(\x0b\x32\x19.keystork.v1.KeyParameter\"\x84\x02\n\x0bKeyMetadata\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12\x1a\n\x12key_security_level\x18\x02 \x01(\x05\x12\x32\n\x0e\x61uthorizations\x18\x03 \x03(\x0b\x32\x1a.keystork.v1.Authorization\x12\x18\n\x0b\x63\x65rtificate\x18\x04 \x01(\x0cH\x00\x88\x01\x01\x12\x1e\n\x11\x63\x65rtificate_chain\x18\x05 \x01(\x0cH\x01\x88\x01\x01\x12\x1c\n\x14modification_time_ms\x18\x06 \x01(\x03\x42\x0e\n\x0c_certificateB\x14\n\x12_certificate_chain\"=\n\x12GetKeyEntryRequest\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\"A\n\x13GetKeyEntryResponse\x12*\n\x08metadata\x18\x01 \x01(\x0b\x32\x18.keystork.v1.KeyMetadata\"\x90\x01\n\x0eOperationStart\x12\'\n\x03key\x18\x01 \x01(\x0b\x32\x1a.keystork.v1.KeyDescriptor\x12-\n\nparameters\x18\x02 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12\x0e\n\x06\x66orced\x18\x03 \x01(\x08\x12\x16\n\x0esecurity_level\x18\x04 \x01(\x05\"\xa7\x01\n\x0eOperationBegun\x12-\n\nparameters\x18\x01 \x03(\x0b\x32\x19.keystork.v1.KeyParameter\x12 \n\x13operation_challenge\x18\x02 \x01(\x03H\x00\x88\x01\x01\x12\x1a\n\rupgraded_blob\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x42\x16\n\x14_operation_challengeB\x10\n\x0e_upgraded_blob\"\x9f\x01\n\x13RunOperationRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\x12\x10\n\x03\x61\x61\x64\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x12\x12\n\x05input\x18\x03 \x01(\x0cH\x01\x88\x01\x01\x12\x16\n\tsignature\x18\x04 \x01(\x0cH\x02\x88\x01\x01\x42\x06\n\x04_aadB\x08\n\x06_inputB\x0c\n\n_signature\"b\n\x14RunOperationResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\x12\x13\n\x06output\x18\x02 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"<\n\x0eOpBeginRequest\x12*\n\x05start\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationStart\"=\n\x0fOpBeginResponse\x12*\n\x05\x62\x65gun\x18\x01 \x01(\x0b\x32\x1b.keystork.v1.OperationBegun\"!\n\x12OpUpdateAadRequest\x12\x0b\n\x03\x61\x61\x64\x18\x01 \x01(\x0c\"\x15\n\x13OpUpdateAadResponse\" \n\x0fOpUpdateRequest\x12\r\n\x05input\x18\x01 \x01(\x0c\"2\n\x10OpUpdateResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"U\n\x0fOpFinishRequest\x12\x12\n\x05input\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x12\x16\n\tsignature\x18\x02 \x01(\x0cH\x01\x88\x01\x01\x42\x08\n\x06_inputB\x0c\n\n_signature\"2\n\x10OpFinishResponse\x12\x13\n\x06output\x18\x01 \x01(\x0cH\x00\x88\x01\x01\x42\t\n\x07_output\"\x10\n\x0eOpAbortRequest\"\x11\n\x0fOpAbortResponse\"\xb2\x03\n\x07Request\x12(\n\x04list\x18\x01 \x01(\x0b\x32\x18.keystork.v1.ListRequestH\x00\x12\x38\n\rget_key_entry\x18\x08 \x01(\x0b\x32\x1f.keystork.v1.GetKeyEntryRequestH\x00\x12\x39\n\rrun_operation\x18\x02 \x01(\x0b\x32 .keystork.v1.RunOperationRequestH\x00\x12/\n\x08op_begin\x18\x03 \x01(\x0b\x32\x1b.keystork.v1.OpBeginRequestH\x00\x12\x38\n\rop_update_aad\x18\x04 \x01(\x0b\x32\x1f.keystork.v1.OpUpdateAadRequestH\x00\x12\x31\n\top_update\x18\x05 \x01(\x0b\x32\x1c.keystork.v1.OpUpdateRequestH\x00\x12\x31\n\top_finish\x18\x06 \x01(\x0b\x32\x1c.keystork.v1.OpFinishRequestH\x00\x12/\n\x08op_abort\x18\x07 \x01(\x0b\x32\x1b.keystork.v1.OpAbortRequestH\x00\x42\x06\n\x04\x62ody\"\xe0\x03\n\x08Response\x12#\n\x05\x65rror\x18\x01 \x01(\x0b\x32\x12.keystork.v1.ErrorH\x00\x12)\n\x04list\x18\x02 \x01(\x0b\x32\x19.keystork.v1.ListResponseH\x00\x12\x39\n\rget_key_entry\x18\t \x01(\x0b\x32 .keystork.v1.GetKeyEntryResponseH\x00\x12:\n\rrun_operation\x18\x03 \x01(\x0b\x32!.keystork.v1.RunOperationResponseH\x00\x12\x30\n\x08op_begin\x18\x04 \x01(\x0b\x32\x1c.keystork.v1.OpBeginResponseH\x00\x12\x39\n\rop_update_aad\x18\x05 \x01(\x0b\x32 .keystork.v1.OpUpdateAadResponseH\x00\x12\x32\n\top_update\x18\x06 \x01(\x0b\x32\x1d.keystork.v1.OpUpdateResponseH\x00\x12\x32\n\top_finish\x18\x07 \x01(\x0b\x32\x1d.keystork.v1.OpFinishResponseH\x00\x12\x30\n\x08op_abort\x18\x08 \x01(\x0b\x32\x1c.keystork.v1.OpAbortResponseH\x00\x42\x06\n\x04\x62ody*K\n\x0fProtocolVersion\x12 \n\x1cPROTOCOL_VERSION_UNSPECIFIED\x10\x00\x12\x16\n\x12PROTOCOL_VERSION_1\x10\x01\x42\x02H\x03\x62\x06proto3')
 
 _PROTOCOLVERSION = DESCRIPTOR.enum_types_by_name['ProtocolVersion']
 ProtocolVersion = enum_type_wrapper.EnumTypeWrapper(_PROTOCOLVERSION)
@@ -27,8 +27,27 @@ _ERROR = DESCRIPTOR.message_types_by_name['Error']
 _HANDSHAKE = DESCRIPTOR.message_types_by_name['Handshake']
 _HANDSHAKEACK = DESCRIPTOR.message_types_by_name['HandshakeAck']
 _KEYDESCRIPTOR = DESCRIPTOR.message_types_by_name['KeyDescriptor']
+_KEYPARAMETER = DESCRIPTOR.message_types_by_name['KeyParameter']
 _LISTREQUEST = DESCRIPTOR.message_types_by_name['ListRequest']
 _LISTRESPONSE = DESCRIPTOR.message_types_by_name['ListResponse']
+_AUTHORIZATION = DESCRIPTOR.message_types_by_name['Authorization']
+_KEYMETADATA = DESCRIPTOR.message_types_by_name['KeyMetadata']
+_GETKEYENTRYREQUEST = DESCRIPTOR.message_types_by_name['GetKeyEntryRequest']
+_GETKEYENTRYRESPONSE = DESCRIPTOR.message_types_by_name['GetKeyEntryResponse']
+_OPERATIONSTART = DESCRIPTOR.message_types_by_name['OperationStart']
+_OPERATIONBEGUN = DESCRIPTOR.message_types_by_name['OperationBegun']
+_RUNOPERATIONREQUEST = DESCRIPTOR.message_types_by_name['RunOperationRequest']
+_RUNOPERATIONRESPONSE = DESCRIPTOR.message_types_by_name['RunOperationResponse']
+_OPBEGINREQUEST = DESCRIPTOR.message_types_by_name['OpBeginRequest']
+_OPBEGINRESPONSE = DESCRIPTOR.message_types_by_name['OpBeginResponse']
+_OPUPDATEAADREQUEST = DESCRIPTOR.message_types_by_name['OpUpdateAadRequest']
+_OPUPDATEAADRESPONSE = DESCRIPTOR.message_types_by_name['OpUpdateAadResponse']
+_OPUPDATEREQUEST = DESCRIPTOR.message_types_by_name['OpUpdateRequest']
+_OPUPDATERESPONSE = DESCRIPTOR.message_types_by_name['OpUpdateResponse']
+_OPFINISHREQUEST = DESCRIPTOR.message_types_by_name['OpFinishRequest']
+_OPFINISHRESPONSE = DESCRIPTOR.message_types_by_name['OpFinishResponse']
+_OPABORTREQUEST = DESCRIPTOR.message_types_by_name['OpAbortRequest']
+_OPABORTRESPONSE = DESCRIPTOR.message_types_by_name['OpAbortResponse']
 _REQUEST = DESCRIPTOR.message_types_by_name['Request']
 _RESPONSE = DESCRIPTOR.message_types_by_name['Response']
 _ERROR_KIND = _ERROR.enum_types_by_name['Kind']
@@ -60,6 +79,13 @@ KeyDescriptor = _reflection.GeneratedProtocolMessageType('KeyDescriptor', (_mess
   })
 _sym_db.RegisterMessage(KeyDescriptor)
 
+KeyParameter = _reflection.GeneratedProtocolMessageType('KeyParameter', (_message.Message,), {
+  'DESCRIPTOR' : _KEYPARAMETER,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.KeyParameter)
+  })
+_sym_db.RegisterMessage(KeyParameter)
+
 ListRequest = _reflection.GeneratedProtocolMessageType('ListRequest', (_message.Message,), {
   'DESCRIPTOR' : _LISTREQUEST,
   '__module__' : 'keystork_pb2'
@@ -73,6 +99,132 @@ ListResponse = _reflection.GeneratedProtocolMessageType('ListResponse', (_messag
   # @@protoc_insertion_point(class_scope:keystork.v1.ListResponse)
   })
 _sym_db.RegisterMessage(ListResponse)
+
+Authorization = _reflection.GeneratedProtocolMessageType('Authorization', (_message.Message,), {
+  'DESCRIPTOR' : _AUTHORIZATION,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.Authorization)
+  })
+_sym_db.RegisterMessage(Authorization)
+
+KeyMetadata = _reflection.GeneratedProtocolMessageType('KeyMetadata', (_message.Message,), {
+  'DESCRIPTOR' : _KEYMETADATA,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.KeyMetadata)
+  })
+_sym_db.RegisterMessage(KeyMetadata)
+
+GetKeyEntryRequest = _reflection.GeneratedProtocolMessageType('GetKeyEntryRequest', (_message.Message,), {
+  'DESCRIPTOR' : _GETKEYENTRYREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.GetKeyEntryRequest)
+  })
+_sym_db.RegisterMessage(GetKeyEntryRequest)
+
+GetKeyEntryResponse = _reflection.GeneratedProtocolMessageType('GetKeyEntryResponse', (_message.Message,), {
+  'DESCRIPTOR' : _GETKEYENTRYRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.GetKeyEntryResponse)
+  })
+_sym_db.RegisterMessage(GetKeyEntryResponse)
+
+OperationStart = _reflection.GeneratedProtocolMessageType('OperationStart', (_message.Message,), {
+  'DESCRIPTOR' : _OPERATIONSTART,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OperationStart)
+  })
+_sym_db.RegisterMessage(OperationStart)
+
+OperationBegun = _reflection.GeneratedProtocolMessageType('OperationBegun', (_message.Message,), {
+  'DESCRIPTOR' : _OPERATIONBEGUN,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OperationBegun)
+  })
+_sym_db.RegisterMessage(OperationBegun)
+
+RunOperationRequest = _reflection.GeneratedProtocolMessageType('RunOperationRequest', (_message.Message,), {
+  'DESCRIPTOR' : _RUNOPERATIONREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.RunOperationRequest)
+  })
+_sym_db.RegisterMessage(RunOperationRequest)
+
+RunOperationResponse = _reflection.GeneratedProtocolMessageType('RunOperationResponse', (_message.Message,), {
+  'DESCRIPTOR' : _RUNOPERATIONRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.RunOperationResponse)
+  })
+_sym_db.RegisterMessage(RunOperationResponse)
+
+OpBeginRequest = _reflection.GeneratedProtocolMessageType('OpBeginRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPBEGINREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpBeginRequest)
+  })
+_sym_db.RegisterMessage(OpBeginRequest)
+
+OpBeginResponse = _reflection.GeneratedProtocolMessageType('OpBeginResponse', (_message.Message,), {
+  'DESCRIPTOR' : _OPBEGINRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpBeginResponse)
+  })
+_sym_db.RegisterMessage(OpBeginResponse)
+
+OpUpdateAadRequest = _reflection.GeneratedProtocolMessageType('OpUpdateAadRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPUPDATEAADREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpUpdateAadRequest)
+  })
+_sym_db.RegisterMessage(OpUpdateAadRequest)
+
+OpUpdateAadResponse = _reflection.GeneratedProtocolMessageType('OpUpdateAadResponse', (_message.Message,), {
+  'DESCRIPTOR' : _OPUPDATEAADRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpUpdateAadResponse)
+  })
+_sym_db.RegisterMessage(OpUpdateAadResponse)
+
+OpUpdateRequest = _reflection.GeneratedProtocolMessageType('OpUpdateRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPUPDATEREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpUpdateRequest)
+  })
+_sym_db.RegisterMessage(OpUpdateRequest)
+
+OpUpdateResponse = _reflection.GeneratedProtocolMessageType('OpUpdateResponse', (_message.Message,), {
+  'DESCRIPTOR' : _OPUPDATERESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpUpdateResponse)
+  })
+_sym_db.RegisterMessage(OpUpdateResponse)
+
+OpFinishRequest = _reflection.GeneratedProtocolMessageType('OpFinishRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPFINISHREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpFinishRequest)
+  })
+_sym_db.RegisterMessage(OpFinishRequest)
+
+OpFinishResponse = _reflection.GeneratedProtocolMessageType('OpFinishResponse', (_message.Message,), {
+  'DESCRIPTOR' : _OPFINISHRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpFinishResponse)
+  })
+_sym_db.RegisterMessage(OpFinishResponse)
+
+OpAbortRequest = _reflection.GeneratedProtocolMessageType('OpAbortRequest', (_message.Message,), {
+  'DESCRIPTOR' : _OPABORTREQUEST,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpAbortRequest)
+  })
+_sym_db.RegisterMessage(OpAbortRequest)
+
+OpAbortResponse = _reflection.GeneratedProtocolMessageType('OpAbortResponse', (_message.Message,), {
+  'DESCRIPTOR' : _OPABORTRESPONSE,
+  '__module__' : 'keystork_pb2'
+  # @@protoc_insertion_point(class_scope:keystork.v1.OpAbortResponse)
+  })
+_sym_db.RegisterMessage(OpAbortResponse)
 
 Request = _reflection.GeneratedProtocolMessageType('Request', (_message.Message,), {
   'DESCRIPTOR' : _REQUEST,
@@ -92,8 +244,8 @@ if _descriptor._USE_C_DESCRIPTORS == False:
 
   DESCRIPTOR._options = None
   DESCRIPTOR._serialized_options = b'H\003'
-  _PROTOCOLVERSION._serialized_start=848
-  _PROTOCOLVERSION._serialized_end=923
+  _PROTOCOLVERSION._serialized_start=3230
+  _PROTOCOLVERSION._serialized_end=3305
   _ERROR._serialized_start=32
   _ERROR._serialized_end=230
   _ERROR_KIND._serialized_start=135
@@ -104,12 +256,50 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _HANDSHAKEACK._serialized_end=395
   _KEYDESCRIPTOR._serialized_start=397
   _KEYDESCRIPTOR._serialized_end=502
-  _LISTREQUEST._serialized_start=504
-  _LISTREQUEST._serialized_end=624
-  _LISTRESPONSE._serialized_start=626
-  _LISTRESPONSE._serialized_end=685
-  _REQUEST._serialized_start=687
-  _REQUEST._serialized_end=746
-  _RESPONSE._serialized_start=748
-  _RESPONSE._serialized_end=846
+  _KEYPARAMETER._serialized_start=504
+  _KEYPARAMETER._serialized_end=621
+  _LISTREQUEST._serialized_start=623
+  _LISTREQUEST._serialized_end=743
+  _LISTRESPONSE._serialized_start=745
+  _LISTRESPONSE._serialized_end=804
+  _AUTHORIZATION._serialized_start=806
+  _AUTHORIZATION._serialized_end=891
+  _KEYMETADATA._serialized_start=894
+  _KEYMETADATA._serialized_end=1154
+  _GETKEYENTRYREQUEST._serialized_start=1156
+  _GETKEYENTRYREQUEST._serialized_end=1217
+  _GETKEYENTRYRESPONSE._serialized_start=1219
+  _GETKEYENTRYRESPONSE._serialized_end=1284
+  _OPERATIONSTART._serialized_start=1287
+  _OPERATIONSTART._serialized_end=1431
+  _OPERATIONBEGUN._serialized_start=1434
+  _OPERATIONBEGUN._serialized_end=1601
+  _RUNOPERATIONREQUEST._serialized_start=1604
+  _RUNOPERATIONREQUEST._serialized_end=1763
+  _RUNOPERATIONRESPONSE._serialized_start=1765
+  _RUNOPERATIONRESPONSE._serialized_end=1863
+  _OPBEGINREQUEST._serialized_start=1865
+  _OPBEGINREQUEST._serialized_end=1925
+  _OPBEGINRESPONSE._serialized_start=1927
+  _OPBEGINRESPONSE._serialized_end=1988
+  _OPUPDATEAADREQUEST._serialized_start=1990
+  _OPUPDATEAADREQUEST._serialized_end=2023
+  _OPUPDATEAADRESPONSE._serialized_start=2025
+  _OPUPDATEAADRESPONSE._serialized_end=2046
+  _OPUPDATEREQUEST._serialized_start=2048
+  _OPUPDATEREQUEST._serialized_end=2080
+  _OPUPDATERESPONSE._serialized_start=2082
+  _OPUPDATERESPONSE._serialized_end=2132
+  _OPFINISHREQUEST._serialized_start=2134
+  _OPFINISHREQUEST._serialized_end=2219
+  _OPFINISHRESPONSE._serialized_start=2221
+  _OPFINISHRESPONSE._serialized_end=2271
+  _OPABORTREQUEST._serialized_start=2273
+  _OPABORTREQUEST._serialized_end=2289
+  _OPABORTRESPONSE._serialized_start=2291
+  _OPABORTRESPONSE._serialized_end=2308
+  _REQUEST._serialized_start=2311
+  _REQUEST._serialized_end=2745
+  _RESPONSE._serialized_start=2748
+  _RESPONSE._serialized_end=3228
 # @@protoc_insertion_point(module_scope)
