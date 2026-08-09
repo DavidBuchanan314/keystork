@@ -15,6 +15,7 @@ An incomplete list of features:
 
 - Play Integrity token minting.
 - Unrestricted KeyStore access (including Android Key Attestation)
+- `X-Goog-Spatula` header minting (assuming a pre-provisioned DeviceKey).
 - Remote file read (like `adb pull`).
 - Remote execve (like `adb shell`, but also scriptable via Python API).
 
@@ -36,7 +37,7 @@ Just setuid to that of the target app, and ask nicely.
 
 ## Impacts
 
-My use of the word "sidestep" instead of "break" is deliberate.
+My use of the word "sidestep" is deliberate.
 It would be misleading to say that this *completely* breaks Play Integrity and Android Key Attestation,
 since you still need a genuine physical device in your posession to mint the tokens on.
 We aren't pulling them out of thin air.
@@ -44,4 +45,4 @@ However, for many (most?) use cases it completely defeats the purpose.
 
 Perhaps those who've been begging app developers to add GrapheneOS's AVB keys to their Android Key Attestation allowlist
 should instead consider asking them to remove the attestation entirely (thus enabling support for GrapheneOS, *and* all other 3rd party OSes),
-citing this repo as proof of its uselessness. If that doesn't work, open a PR adding their app to the `examples/` directory.
+citing this repo as proof of its uselessness. If that doesn't work, maybe open a PR adding a PoC against their app to the `examples/` directory.

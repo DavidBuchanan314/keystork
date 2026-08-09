@@ -5,6 +5,8 @@ import os
 import requests
 import keystork
 
+# hosted instance of https://github.com/1nikolas/play-integrity-checker-app
+# (must be installed on the target device, via https://play.google.com/store/apps/details?id=gr.nikolasspyr.integritycheck )
 PACKAGE = "gr.nikolasspyr.integritycheck"
 VERDICT_URL = "https://integrity.1nikolas.dev/api/check"
 
