@@ -1,7 +1,7 @@
 """keystork -- drive a remote Android device's keystore2 over IP.
 
     >>> import keystork
-    >>> with keystork.Session(uid=10123) as ks:
+    >>> with keystork.KeystoreSession(uid=10123) as ks:
     ...     for key in ks.list():
     ...         print(key)
 
@@ -50,6 +50,7 @@ from .session import (
     MIN_INTERFACE_VERSION,
     PROTOCOL_VERSION,
     Authorization,
+    Device,
     KeyDescriptor,
     KeyMetadata,
     KeyParameter,
@@ -57,7 +58,9 @@ from .session import (
     OperationBegun,
     OperationResult,
     NONCE_LENGTHS,
+    KeystoreSession,
     Session,
+    kill_server,
     nonce_length,
     operation_parameters,
 )
@@ -74,6 +77,7 @@ __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "DEFAULT_TIMEOUT",
+    "Device",
     "Digest",
     "Domain",
     "EcCurve",
@@ -87,6 +91,7 @@ __all__ = [
     "KeyParameter",
     "KeyPurpose",
     "KeystoreError",
+    "KeystoreSession",
     "KeystorkError",
     "MIN_INTERFACE_VERSION",
     "MlDsaVariant",
@@ -106,6 +111,7 @@ __all__ = [
     "TagType",
     "TransactionError",
     "UnsupportedByDevice",
+    "kill_server",
     "name_of",
     "nonce_length",
     "operation_parameters",

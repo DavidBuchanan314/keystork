@@ -1,15 +1,20 @@
 // keystork wire protocol.
 //
 // Framing: every message below is written as a 4-byte big-endian length
-// followed by that many bytes of serialized protobuf. A connection is a
-// UID-scoped session:
+// followed by that many bytes of serialized protobuf. Every connection opens by
+// saying what it is for:
 //
-//   client -> Handshake       (mandatory first message)
-//   server -> HandshakeAck
+//   client -> Open            (mandatory first message)
+//   server -> OpenAck
+//
+// Some commands are complete at that point (kill_server). One that opens a
+// session continues:
+//
 //   client -> Request         \  repeated, strictly synchronous,
 //   server -> Response        /  one in flight at a time
 //
-// A Request before a successful handshake is a protocol error.
+// A Request before a successful Open is a protocol error, as is one that does
+// not belong to the kind of session that was opened.
 //
 // Modeling rules (see design_docs/keystore-over-ip-design.md §4):
 //   - The wire speaks KeyMint's raw integers. Enums from keystore2/KeyMint are
@@ -24,7 +29,7 @@ package keystork.v1;
 option optimize_for = LITE_RUNTIME;
 
 // Bumped only for incompatible changes to framing or the handshake.
-// Handshake.protocol_version must equal this.
+// Open.protocol_version must equal this.
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;
   PROTOCOL_VERSION_1 = 1;
@@ -55,8 +60,8 @@ message Error {
 
     // Session setup failed before any keystore2 call: bad UID, setresgid /
     // setresuid failure, or the keystore2 service could not be reached.
-    // Only ever carried in a HandshakeAck. `code` is an errno where one
-    // applies, otherwise 0.
+    // Only ever carried in an OpenAck. `code` is an errno where one applies,
+    // otherwise 0.
     IDENTITY = 4;
   }
 
@@ -78,33 +83,81 @@ message Error {
 }
 
 // ---------------------------------------------------------------------------
-// Handshake
+// Open -- what this connection is for
+//
+// The daemon does more than one thing, and a keystore session is only one of
+// them, so the first message names a command rather than declaring a UID. The
+// version lives on the envelope rather than inside each command: it has to be
+// readable before the command can be interpreted at all.
 // ---------------------------------------------------------------------------
 
-message Handshake {
+message Open {
   // Must be PROTOCOL_VERSION_1.
   uint32 protocol_version = 1;
 
-  // The UID this session acts as. The child permanently drops to it before
-  // opening Binder and can never return to root, which is why the UID is a
-  // per-connection property rather than a per-request one. The primary GID is
-  // set to this same value.
-  uint32 uid = 2;
+  oneof command {
+    StartKeystoreSession keystore = 2;
+    KillServer kill_server = 3;
+  }
 }
 
-message HandshakeAck {
-  // Unset on success. When set, the session is over: the server closes the
-  // connection immediately after writing this message.
+// Opens a UID-scoped keystore2 session. The child permanently drops to the UID
+// before opening Binder and can never return to root, which is why the UID is a
+// per-connection property rather than a per-request one.
+message StartKeystoreSession {
+  // Who to be. A package name is resolved on the device, because the mapping
+  // lives there and a client has no way to know it -- unlike enum names or
+  // pagination, this is a device fact rather than an interpretation, so it is
+  // not a case of the server knowing too much.
+  oneof identity {
+    // The UID directly; also becomes the primary GID.
+    uint32 uid = 1;
+    PackageIdentity package = 2;
+  }
+}
+
+message PackageIdentity {
+  // Exact package name, e.g. "com.google.android.gms".
+  string name = 1;
+
+  // Android user id. 0 is the primary user; a work profile is usually 10. The
+  // UID is the package's app id offset by 100000 per user, which is the
+  // platform's own arithmetic.
+  uint32 user = 2;
+}
+
+// Stops the daemon. The supervisor SIGTERMs every live session and exits, so
+// other clients lose their connections. Acked before anything is signalled, so
+// the caller learns it was accepted. This grants nothing new: anything that can
+// reach the socket can already act as any UID.
+message KillServer {}
+
+message OpenAck {
+  // Unset on success. When set, the connection is over: the server closes it
+  // immediately after writing this message.
   Error error = 1;
 
   uint32 protocol_version = 2;
 
-  // What the device's keystore2 reports from getInterfaceVersion(). The
-  // client owns the capability table keyed off this number, so it can say
-  // "this device is V3, that call needs V5" rather than surfacing a bare
-  // UNKNOWN_TRANSACTION. Only meaningful when `error` is unset.
-  int32 keystore_interface_version = 3;
+  oneof result {
+    KeystoreSessionStarted keystore = 3;
+    KillServerAck kill_server = 4;
+  }
 }
+
+message KeystoreSessionStarted {
+  // What the device's keystore2 reports from getInterfaceVersion(). The client
+  // owns the capability table keyed off this number, so it can say "this device
+  // is V3, that call needs V5" rather than surfacing a bare
+  // UNKNOWN_TRANSACTION.
+  int32 keystore_interface_version = 1;
+
+  // The UID this session actually became. Always set, so a client that asked by
+  // package name learns what that resolved to.
+  uint32 uid = 2;
+}
+
+message KillServerAck {}
 
 // ---------------------------------------------------------------------------
 // Shared types

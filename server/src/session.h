@@ -1,15 +1,25 @@
 #pragma once
 
+#include <sys/types.h>
+
 namespace keystork {
 
-// Runs one UID-scoped session on `fd` to completion, then returns the exit
-// status the child should use.
+// Serves one connection on `fd` to completion, then returns the exit status the
+// child should use.
 //
-// Called only in a forked child, which has already closed the listening
-// socket. The child reads the handshake, permanently drops to the UID it names,
-// opens its own Binder connection, and then serves requests synchronously until
-// the peer disconnects. It never returns to root, and it never outlives the
-// connection -- that is what keeps sessions single-UID.
-int RunSession(int fd);
+// Called only in a forked child, which has already closed the listening socket.
+// The child reads the mandatory Open message and does whatever it asks for:
+//
+//   StartKeystoreSession -- permanently drop to the UID it names, open a Binder
+//     connection, and serve requests synchronously until the peer disconnects.
+//     The child never returns to root and never outlives the connection, which
+//     is what keeps sessions single-UID.
+//
+//   KillServer -- acknowledge, then SIGTERM `supervisor_pid`, which takes down
+//     the supervisor and every other session with it.
+//
+// `supervisor_pid` is passed in rather than read from getppid(), which would
+// name init if the supervisor had already exited.
+int RunConnection(int fd, pid_t supervisor_pid);
 
 }  // namespace keystork

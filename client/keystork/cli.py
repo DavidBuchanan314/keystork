@@ -1,9 +1,9 @@
 """A thin CLI over the library. The library is the product.
 
-    keystork list --uid 10123
-    keystork info --uid 10123 my_key
-    keystork sign --uid 10123 my_key --text hello > sig
-    keystork encrypt --uid 10123 my_aes --text secret --nonce-out iv.bin > ct
+    keystork keystore --uid 10123 list
+    keystork keystore --uid 10123 info my_key
+    keystork keystore --uid 10123 sign my_key --text hello > sig
+    keystork kill-server
 
 Crypto output is raw bytes on stdout so it pipes; pass ``--hex`` for a
 hex string instead. Parameters left unset are read from the key itself.
@@ -22,9 +22,11 @@ from .session import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
+    Device,
     KeyDescriptor,
     KeyMetadata,
-    Session,
+    KeystoreSession,
+    kill_server,
     nonce_length,
 )
 
@@ -39,6 +41,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_connection_args(parser: argparse.ArgumentParser) -> None:
+    """Where the daemon is. Top-level, because it applies to every command."""
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"default: {DEFAULT_HOST}")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default: {DEFAULT_PORT}")
     parser.add_argument(
@@ -46,9 +49,6 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=DEFAULT_TIMEOUT,
         help=f"socket timeout in seconds (default: {DEFAULT_TIMEOUT:g})",
-    )
-    parser.add_argument(
-        "--uid", type=int, required=True, help="the UID this session acts as"
     )
 
 
@@ -93,11 +93,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="keystork", description="Drive a remote device's keystore2 over IP."
     )
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    _add_connection_args(parser)
+    _add_common_args(parser)
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    listing = subcommands.add_parser("list", help="list the keys visible to a UID")
-    _add_common_args(listing)
-    _add_connection_args(listing)
+    # A keystore session is one of the things the daemon can do; --uid is how
+    # that session is opened, so it lives here rather than at the top level.
+    keystore = commands.add_parser("keystore", help="open a UID-scoped keystore2 session")
+    identity = keystore.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--uid", type=int, help="the UID this session acts as")
+    identity.add_argument(
+        "--package",
+        help="package name to act as; the device resolves it to a UID",
+    )
+    keystore.add_argument(
+        "--user",
+        type=int,
+        default=0,
+        help="Android user id for --package (default: 0; a work profile is usually 10)",
+    )
+    operations = keystore.add_subparsers(dest="operation", required=True)
+
+    listing = operations.add_parser("list", help="list the keys visible to the UID")
     listing.add_argument(
         "--domain",
         default="APP",
@@ -124,9 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--long", action="store_true", help="show domain and namespace, not just aliases"
     )
 
-    info = subcommands.add_parser("info", help="show how a key was generated")
-    _add_common_args(info)
-    _add_connection_args(info)
+    info = operations.add_parser("info", help="show how a key was generated")
     _add_key_arg(info)
     info.add_argument(
         "--authorizations",
@@ -136,21 +151,17 @@ def _build_parser() -> argparse.ArgumentParser:
     info.add_argument("--cert-out", metavar="FILE", help="write the leaf certificate (DER) to FILE")
     info.add_argument("--chain-out", metavar="FILE", help="write the certificate chain to FILE")
 
-    signing = subcommands.add_parser("sign", help="sign input with a key")
-    _add_common_args(signing)
-    _add_connection_args(signing)
+    signing = operations.add_parser("sign", help="sign input with a key")
     _add_key_arg(signing)
     _add_input_args(signing)
     _add_parameter_args(signing, symmetric=False)
 
-    verifying = subcommands.add_parser(
+    verifying = operations.add_parser(
         "verify",
         help="verify a signature (symmetric keys only)",
         description="Exits 0 when the signature verifies and 2 when it does not. "
         "keystore2 refuses this for asymmetric keys; verify those against the certificate.",
     )
-    _add_common_args(verifying)
-    _add_connection_args(verifying)
     _add_key_arg(verifying)
     _add_input_args(verifying)
     _add_parameter_args(verifying, symmetric=False)
@@ -158,19 +169,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--signature", metavar="FILE", required=True, help="the signature to check"
     )
 
-    encrypting = subcommands.add_parser("encrypt", help="encrypt input with a key")
-    _add_common_args(encrypting)
-    _add_connection_args(encrypting)
+    encrypting = operations.add_parser("encrypt", help="encrypt input with a key")
     _add_key_arg(encrypting)
     _add_input_args(encrypting)
     _add_parameter_args(encrypting, symmetric=True)
 
-    decrypting = subcommands.add_parser("decrypt", help="decrypt input with a key")
-    _add_common_args(decrypting)
-    _add_connection_args(decrypting)
+    decrypting = operations.add_parser("decrypt", help="decrypt input with a key")
     _add_key_arg(decrypting)
     _add_input_args(decrypting)
     _add_parameter_args(decrypting, symmetric=True)
+
+    commands.add_parser(
+        "kill-server",
+        help="stop the daemon",
+        description="SIGTERMs every live session and stops the daemon. "
+        "Other clients lose their connections.",
+    )
 
     return parser
 
@@ -258,7 +272,7 @@ def _print_info(metadata: KeyMetadata, args: argparse.Namespace) -> None:
         _write_output(metadata.certificate_chain, args.chain_out, False)
 
 
-def _nonce_length_for(session: Session, args: argparse.Namespace) -> int:
+def _nonce_length_for(session: KeystoreSession, args: argparse.Namespace) -> int:
     """How many leading bytes of the input are the nonce.
 
     Asks for the same parameters the decrypt itself will use, so an inferred
@@ -276,26 +290,26 @@ def _nonce_length_for(session: Session, args: argparse.Namespace) -> int:
     return nonce_length(session.characteristics(args.alias).algorithm, block_mode)
 
 
-def _run(session: Session, args: argparse.Namespace) -> int:
-    if args.command == "list":
+def _run(session: KeystoreSession, args: argparse.Namespace) -> int:
+    if args.operation == "list":
         entries = session.list(
             domain=Domain[args.domain], nspace=args.nspace, batched=args.batched
         )
         _print_listing(entries, args.long)
         return 0
 
-    if args.command == "info":
+    if args.operation == "info":
         _print_info(session.get_key_entry(args.alias), args)
         return 0
 
-    if args.command == "sign":
+    if args.operation == "sign":
         signature = session.sign(
             args.alias, _read_input(args), **_parameter_kwargs(args, symmetric=False)
         )
         _write_output(signature, args.out, args.hex)
         return 0
 
-    if args.command == "verify":
+    if args.operation == "verify":
         with open(args.signature, "rb") as handle:
             signature = handle.read()
         ok = session.verify(
@@ -308,7 +322,7 @@ def _run(session: Session, args: argparse.Namespace) -> int:
             print("valid" if ok else "invalid", file=sys.stderr)
         return 0 if ok else 2
 
-    if args.command == "encrypt":
+    if args.operation == "encrypt":
         result = session.encrypt(
             args.alias, _read_input(args), **_parameter_kwargs(args, symmetric=True)
         )
@@ -317,7 +331,7 @@ def _run(session: Session, args: argparse.Namespace) -> int:
         _write_output((result.nonce or b"") + result.output, args.out, args.hex)
         return 0
 
-    if args.command == "decrypt":
+    if args.operation == "decrypt":
         data = _read_input(args)
         kwargs = _parameter_kwargs(args, symmetric=True)
         if kwargs["nonce"] is None:
@@ -333,18 +347,29 @@ def _run(session: Session, args: argparse.Namespace) -> int:
         _write_output(plaintext, args.out, args.hex)
         return 0
 
-    raise errors.KeystorkError(f"unimplemented command {args.command!r}")
+    raise errors.KeystorkError(f"unimplemented operation {args.operation!r}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    device = Device(args.host, args.port, args.timeout)
 
     try:
-        with Session(args.uid, args.host, args.port, args.timeout) as session:
+        if args.command == "kill-server":
+            kill_server(device)
             if args.verbose:
+                print(f"stopped keystorkd on {device}", file=sys.stderr)
+            return 0
+
+        with KeystoreSession(
+            args.uid, device, package=args.package, user=args.user
+        ) as session:
+            if args.verbose:
+                who = f"uid={session.uid}"
+                if session.package is not None:
+                    who = f"{session.package} {who}"
                 print(
-                    f"session uid={session.uid}, "
-                    f"keystore2 interface V{session.interface_version}",
+                    f"session {who}, keystore2 interface V{session.interface_version}",
                     file=sys.stderr,
                 )
             return _run(session, args)

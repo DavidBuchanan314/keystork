@@ -1,6 +1,8 @@
 #include "session.h"
 
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -9,6 +11,7 @@
 #include <vector>
 
 #include <grp.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -52,7 +55,55 @@ using ::aidl::android::system::keystore2::KeyDescriptor;
 using ::aidl::android::system::keystore2::KeyEntryResponse;
 
 constexpr char kKeystoreServiceName[] = "android.system.keystore2.IKeystoreService/default";
+
+// The package manager's own record of which UID each package runs as. 0640
+// system:package_info, so it must be read before the privilege drop -- an app
+// UID cannot open it.
+constexpr char kPackagesList[] = "/data/system/packages.list";
+
+// Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
+constexpr long kUserOffset = 100000;
 constexpr uint32_t kProtocolVersion = pb::PROTOCOL_VERSION_1;
+
+// Resolves a package name to the UID it runs as. Every line of packages.list is
+// space-separated with the name first and its user-0 UID second; nothing after
+// that matters here. Parsed with stdio rather than iostreams to keep the
+// binary's static libc++ from growing a locale machinery it uses nowhere else.
+bool ResolvePackage(const std::string& name, uint32_t user, uid_t* uid, std::string* error,
+                    int* error_errno) {
+  FILE* file = ::fopen(kPackagesList, "re");
+  if (file == nullptr) {
+    *error_errno = errno;
+    *error = std::string("could not read ") + kPackagesList + ": " + ::strerror(errno);
+    return false;
+  }
+
+  char* line = nullptr;
+  size_t capacity = 0;
+  bool found = false;
+  while (::getline(&line, &capacity, file) > 0) {
+    const char* separator = ::strchr(line, ' ');
+    if (separator == nullptr) continue;
+    if (static_cast<size_t>(separator - line) != name.size()) continue;
+    if (::memcmp(line, name.data(), name.size()) != 0) continue;
+
+    const long app_uid = ::strtol(separator + 1, nullptr, 10);
+    if (app_uid <= 0) continue;
+    // packages.list records the user-0 UID; strip any user already in it before
+    // applying the requested one.
+    *uid = static_cast<uid_t>(app_uid % kUserOffset + static_cast<long>(user) * kUserOffset);
+    found = true;
+    break;
+  }
+  ::free(line);
+  ::fclose(file);
+
+  if (!found) {
+    *error_errno = 0;
+    *error = "no package named '" + name + "' in " + kPackagesList;
+  }
+  return found;
+}
 
 // Permanently drops to `uid`, used as both UID and primary GID -- real,
 // effective and saved all at once, so there is no way back to root. Must run
@@ -583,44 +634,42 @@ bool SendFrame(int fd, const google::protobuf::MessageLite& message) {
   return WriteFrame(fd, encoded);
 }
 
-// Reads the mandatory handshake, drops privileges, and connects to keystore2.
+// Establishes a keystore session: drops privileges and connects to keystore2.
 // Every failure is reported in the ack rather than by dropping the connection,
 // so the client always learns why a session did not start.
-std::shared_ptr<IKeystoreService> Establish(int fd) {
-  std::string encoded;
-  const FrameStatus frame_status = ReadFrame(fd, &encoded);
-  if (frame_status != FrameStatus::kOk) {
-    // Nothing useful to say to a peer that never sent a readable handshake.
-    KS_LOGE("handshake read failed: %s", ToString(frame_status));
-    return nullptr;
-  }
-
-  pb::HandshakeAck ack;
-  ack.set_protocol_version(kProtocolVersion);
-
-  pb::Handshake handshake;
-  if (!handshake.ParseFromString(encoded)) {
-    FillProtocolError("malformed handshake", ack.mutable_error());
-    SendFrame(fd, ack);
-    return nullptr;
-  }
-  if (handshake.protocol_version() != kProtocolVersion) {
-    FillProtocolError("unsupported protocol version " +
-                          std::to_string(handshake.protocol_version()) + ", this server speaks " +
-                          std::to_string(kProtocolVersion),
-                      ack.mutable_error());
-    SendFrame(fd, ack);
-    return nullptr;
-  }
-
-  const auto uid = static_cast<uid_t>(handshake.uid());
-
+std::shared_ptr<IKeystoreService> StartKeystoreSession(int fd, const pb::StartKeystoreSession& start,
+                                                       pb::OpenAck* ack) {
   std::string error;
   int error_errno = 0;
+
+  uid_t uid = 0;
+  switch (start.identity_case()) {
+    case pb::StartKeystoreSession::kUid:
+      uid = static_cast<uid_t>(start.uid());
+      break;
+    case pb::StartKeystoreSession::kPackage:
+      // Must happen here, while still root: packages.list is unreadable to the
+      // UID this session is about to become.
+      if (!ResolvePackage(start.package().name(), start.package().user(), &uid, &error,
+                          &error_errno)) {
+        KS_LOGE("%s", error.c_str());
+        FillIdentityError(error, error_errno, ack->mutable_error());
+        SendFrame(fd, *ack);
+        return nullptr;
+      }
+      KS_LOGI("package '%s' user %u is uid=%u", start.package().name().c_str(),
+              start.package().user(), uid);
+      break;
+    case pb::StartKeystoreSession::IDENTITY_NOT_SET:
+      FillProtocolError("keystore session names neither a uid nor a package",
+                        ack->mutable_error());
+      SendFrame(fd, *ack);
+      return nullptr;
+  }
   if (!DropPrivileges(uid, &error, &error_errno)) {
     KS_LOGE("could not become uid=%u: %s", uid, error.c_str());
-    FillIdentityError(error, error_errno, ack.mutable_error());
-    SendFrame(fd, ack);
+    FillIdentityError(error, error_errno, ack->mutable_error());
+    SendFrame(fd, *ack);
     return nullptr;
   }
   KS_LOGI("session running as uid=%u", uid);
@@ -628,38 +677,89 @@ std::shared_ptr<IKeystoreService> Establish(int fd) {
   auto service = ConnectKeystore(&error);
   if (service == nullptr) {
     KS_LOGE("%s", error.c_str());
-    FillIdentityError(error, 0, ack.mutable_error());
-    SendFrame(fd, ack);
+    FillIdentityError(error, 0, ack->mutable_error());
+    SendFrame(fd, *ack);
     return nullptr;
   }
 
   // The client drives its capability table off this number, so an interface
   // version we cannot read is a failed session rather than a guess.
   int32_t interface_version = 0;
-  auto status = service->getInterfaceVersion(&interface_version);
+  const auto status = service->getInterfaceVersion(&interface_version);
   if (!status.isOk()) {
     const char* message = status.getMessage();
-    FillIdentityError(std::string("getInterfaceVersion failed: ") + (message ? message : ""),
-                      0, ack.mutable_error());
-    SendFrame(fd, ack);
+    FillIdentityError(std::string("getInterfaceVersion failed: ") + (message ? message : ""), 0,
+                      ack->mutable_error());
+    SendFrame(fd, *ack);
     return nullptr;
   }
 
-  ack.set_keystore_interface_version(interface_version);
+  ack->mutable_keystore()->set_keystore_interface_version(interface_version);
+  ack->mutable_keystore()->set_uid(uid);
   KS_LOGI("keystore2 interface version %d", interface_version);
-  if (!SendFrame(fd, ack)) return nullptr;
+  if (!SendFrame(fd, *ack)) return nullptr;
   return service;
+}
+
+// Acknowledges first, then signals: the client has to learn the kill was
+// accepted, and the supervisor's SIGTERM comes straight back to this child.
+// Still root here -- the UID drop only happens for a keystore session.
+bool KillServer(int fd, pid_t supervisor_pid, pb::OpenAck* ack) {
+  ack->mutable_kill_server();
+  if (!SendFrame(fd, *ack)) return false;
+
+  KS_LOGI("kill_server requested, signalling supervisor %d", supervisor_pid);
+  if (::kill(supervisor_pid, SIGTERM) != 0) {
+    KS_LOGE("could not signal supervisor %d: %s", supervisor_pid, ::strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
 
-int RunSession(int fd) {
+int RunConnection(int fd, pid_t supervisor_pid) {
+  std::string encoded;
+  if (ReadFrame(fd, &encoded) != FrameStatus::kOk) {
+    // Nothing useful to say to a peer that never sent a readable Open.
+    KS_LOGE("open read failed");
+    return 1;
+  }
+
+  pb::OpenAck ack;
+  ack.set_protocol_version(kProtocolVersion);
+
+  pb::Open open;
+  if (!open.ParseFromString(encoded)) {
+    FillProtocolError("malformed open", ack.mutable_error());
+    SendFrame(fd, ack);
+    return 1;
+  }
+  if (open.protocol_version() != kProtocolVersion) {
+    FillProtocolError("unsupported protocol version " +
+                          std::to_string(open.protocol_version()) + ", this server speaks " +
+                          std::to_string(kProtocolVersion),
+                      ack.mutable_error());
+    SendFrame(fd, ack);
+    return 1;
+  }
+
+  if (open.command_case() == pb::Open::kKillServer) {
+    return KillServer(fd, supervisor_pid, &ack) ? 0 : 1;
+  }
+  if (open.command_case() != pb::Open::kKeystore) {
+    // Also what a newer client's unimplemented command looks like here: its
+    // field number is unknown to this build, so no oneof arm is set.
+    FillProtocolError("open names no command this server implements", ack.mutable_error());
+    SendFrame(fd, ack);
+    return 1;
+  }
+
   SessionState session;
-  session.service = Establish(fd);
+  session.service = StartKeystoreSession(fd, open.keystore(), &ack);
   if (session.service == nullptr) return 1;
 
   for (;;) {
-    std::string encoded;
     const FrameStatus frame_status = ReadFrame(fd, &encoded);
     if (frame_status == FrameStatus::kEof) return 0;
     if (frame_status != FrameStatus::kOk) {
