@@ -70,3 +70,6 @@ Testing/
 
 # AOSP checkout for AIDL codegen
 aosp/
+
+# Slop containment
+AGENTS.md
