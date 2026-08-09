@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import socket
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Sequence, Union
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from . import errors
 from ._proto import keystork_pb2 as pb
@@ -29,6 +29,14 @@ from .enums import (
     TagType,
     name_of,
     type_of_tag,
+)
+from .process import (
+    DEFAULT_WINDOW,
+    ESCAPE,
+    ExitStatus,
+    Process,
+    local_window,
+    stdin_is_tty,
 )
 from .transport import Transport
 
@@ -498,6 +506,10 @@ READ_CHUNK_BYTES = 1024 * 1024
 #: which is why it is read with a top-level command before any session opens.
 PACKAGES_LIST = "/data/system/packages.list"
 
+#: What ``system`` and the CLI's ``shell`` run. An absolute path because the
+#: daemon does no PATH search -- it calls execve and nothing else.
+DEVICE_SHELL = "/system/bin/sh"
+
 #: Android offsets each secondary user's UIDs by this much (AID_USER_OFFSET).
 USER_OFFSET = 100000
 
@@ -526,9 +538,10 @@ class Connection:
     """A connection to the daemon, at the top level.
 
     The daemon is root here, and every exchange is one command: read a file,
-    stop the server, or open a session. :meth:`open_keystore_session` is an
-    irreversible state change -- after it the connection is a keystore session
-    and nothing else, because the UID drop cannot be undone.
+    stop the server, run a program, or open a session. Two of those are
+    irreversible -- :meth:`open_keystore_session`, because the UID drop cannot
+    be undone, and :meth:`exec`, because the connection becomes the child's
+    stdio. After either, no command is valid.
 
     >>> with Connection(device) as conn:
     ...     data = conn.read_file(PACKAGES_LIST)
@@ -540,6 +553,7 @@ class Connection:
         self._device = device or Device()
         self._transport = Transport(self._device.dial())
         self._session_open = False
+        self._handed_to = ""
 
         try:
             greeting = self._transport.recv(pb.Greeting())
@@ -558,13 +572,14 @@ class Connection:
 
     @property
     def session_open(self) -> bool:
-        """True once a session has taken over; no command is valid after that."""
+        """True once something has taken over; no command is valid after that."""
         return self._session_open
 
     def _command(self, command: pb.Command) -> pb.CommandResponse:
         if self._session_open:
             raise errors.ProtocolError(
-                "this connection is a keystore session; top-level commands are no longer valid"
+                f"this connection is {self._handed_to}; "
+                "top-level commands are no longer valid"
             )
         self._transport.send(command)
         response = self._transport.recv(pb.CommandResponse())
@@ -614,6 +629,86 @@ class Connection:
         self._command(pb.Command(kill_server=pb.KillServerRequest()))
         self.close()
 
+    def exec(
+        self,
+        path: str,
+        argv: Optional[Sequence[str]] = None,
+        *,
+        env: Optional[Sequence[str]] = None,
+        clear_env: bool = False,
+        cwd: Optional[str] = None,
+        uid: Optional[int] = None,
+        package: Optional[str] = None,
+        user: int = 0,
+        gid: Optional[int] = None,
+        groups: Sequence[int] = (),
+        pty: bool = False,
+        rows: int = DEFAULT_WINDOW[0],
+        cols: int = DEFAULT_WINDOW[1],
+    ) -> Process:
+        """Run `path` on the device and hand this connection to its stdio.
+
+        One-way, like :meth:`open_keystore_session`: the connection carries the
+        child's streams from here on and can never run another command.
+
+        `path` goes to execve unchanged -- no PATH search, no word splitting,
+        no globbing. `argv` defaults to ``[path]``. `env` entries are
+        ``KEY=VALUE`` applied on top of the daemon's own environment unless
+        `clear_env`.
+
+        Leaving `uid` and `package` unset runs the child as root, which the
+        daemon already is. Setting a uid without a `gid` uses the same number
+        for both, which is the Android app convention. Either way this affects
+        only the child -- unlike a keystore session, the connection's own
+        privileges are untouched, because the child is a different process.
+
+        `package` is `uid` by another name: it is resolved to one over this
+        same connection, while it is still root, before the exec. `user`
+        selects the Android user for it.
+
+        `pty` allocates a terminal: the child's ``isatty`` is true, it gets a
+        controlling terminal and a process group of its own, and stderr is no
+        longer separable from stdout.
+
+        The returned :class:`~keystork.Process` takes the socket over, so it is
+        what owns the connection from here -- closing *it* is what closes the
+        connection and, if the child is still running, kills it.
+        """
+        if package is not None:
+            if uid is not None:
+                raise ValueError("name a uid or a package, not both")
+            # Costs a read_file or two, which is only possible up here at the
+            # top level -- so it has to happen before the exec, not after.
+            uid = self.resolve_package(package, user)
+
+        request = pb.ExecRequest(
+            path=path,
+            argv=list(argv) if argv is not None else [],
+            env=list(env) if env is not None else [],
+            clear_env=clear_env,
+            groups=list(groups),
+        )
+        if cwd is not None:
+            request.cwd = cwd
+        if uid is not None:
+            if uid < 0:
+                raise ValueError(f"uid must be non-negative, got {uid}")
+            request.uid = uid
+        if gid is not None:
+            if gid < 0:
+                raise ValueError(f"gid must be non-negative, got {gid}")
+            request.gid = gid
+        if pty:
+            request.pty.rows = rows
+            request.pty.cols = cols
+
+        started = self._command(pb.Command(exec=request)).exec
+        self._session_open = True
+        self._handed_to = f"the stdio of pid {started.pid}"
+        # The two directions run independently from here, so the framed
+        # request/response transport has nothing left to do.
+        return Process(self._transport.detach(), started)
+
     def _open_keystore(self, uid: int) -> pb.KeystoreSessionOpened:
         if uid < 0:
             raise ValueError(f"uid must be non-negative, got {uid}")
@@ -621,6 +716,7 @@ class Connection:
             pb.Command(open_keystore_session=pb.OpenKeystoreSessionRequest(uid=uid))
         )
         self._session_open = True
+        self._handed_to = "a keystore session"
         return response.open_keystore_session
 
     def open_keystore_session(self, uid: int) -> "KeystoreSession":
@@ -645,7 +741,7 @@ class Connection:
         self.close()
 
     def __repr__(self) -> str:
-        state = "closed" if self.closed else ("session" if self._session_open else "top level")
+        state = "closed" if self.closed else (self._handed_to or "top level")
         return f"<keystork.Connection {self._device} {state}>"
 
 
@@ -653,6 +749,97 @@ def kill_server(device: Optional[Device] = None) -> None:
     """Stop the daemon on `device`."""
     with Connection(device) as connection:
         connection.kill_server()
+
+
+def run(
+    path: str,
+    argv: Optional[Sequence[str]] = None,
+    *,
+    device: Optional[Device] = None,
+    stdin: bytes = b"",
+    **kwargs,
+) -> Tuple[ExitStatus, bytes, bytes]:
+    """Run one program on the device and collect what it said.
+
+    A connection of its own, opened and closed around the call, since a
+    connection can only ever carry one process. `kwargs` are
+    :meth:`Connection.exec`'s -- ``uid``, ``package``, ``cwd``, ``env`` and the
+    rest.
+
+    The raw form: bytes, and a status you have to look at yourself. Reach for
+    :func:`system` unless the output is binary or the exit code is the answer.
+
+    >>> status, out, err = keystork.run("/system/bin/am", ["am", "start", "-n", target])
+    """
+    connection = Connection(device)
+    try:
+        process = connection.exec(path, argv, **kwargs)
+    except BaseException:
+        connection.close()
+        raise
+    with process:
+        return process.communicate(stdin)
+
+
+def system(
+    command: str,
+    *,
+    device: Optional[Device] = None,
+    pty: Optional[bool] = None,
+    escape: Optional[int] = ESCAPE,
+    **kwargs,
+) -> int:
+    """``os.system``, pointed at the device.
+
+    Runs `command` under ``sh -c`` on this process's own terminal -- output to
+    this process's stdout and stderr, local stdin forwarded in -- captures
+    nothing, and returns the exit code::
+
+        keystork.system("ls -l /data/local/tmp")
+        keystork.system("am start -n com.foo/.Bar")
+        if keystork.system("pm path com.foo >/dev/null") != 0:
+            ...
+
+    The return value is the exit code as a shell reports it, ``128 + N`` when a
+    signal killed it -- not the encoded wait status ``os.system`` hands back.
+    :func:`run` is the one to use when the output is the point, or when it is
+    binary.
+
+    `command` goes to a shell, so pipes, redirection, globs, ``&&`` and ``$VAR``
+    all mean what they look like -- and, exactly as in a shell, so does anything
+    unquoted that came from somewhere you do not control. Build an argv with
+    :func:`run` when the command is not a literal you typed.
+
+    `pty` defaults to whether this process's stdin is a terminal, which is what
+    makes an inherited terminal behave like one: the child's ``isatty`` is true,
+    it gets colour, ``^C`` reaches it through the remote line discipline rather
+    than raising here, and a full-screen program works. It also merges stderr
+    into stdout, exactly as a shared terminal does.
+
+    A pty is also what makes `escape` matter: with one, every key including
+    ``^C`` belongs to the remote, so :data:`ESCAPE` (``^]``) is the way out of
+    something that has stopped answering. Escaping gives up on the child --
+    which the daemon then kills -- and reports 130, the code a shell uses for
+    "the user stopped this". ``escape=None`` removes the hatch.
+
+    `kwargs` are :meth:`Connection.exec`'s -- ``uid``, ``package``, ``gid``,
+    ``cwd``, ``env``.
+    """
+    if pty is None:
+        pty = stdin_is_tty()
+    rows, cols = local_window()
+
+    connection = Connection(device)
+    try:
+        process = connection.exec(
+            DEVICE_SHELL, ["sh", "-c", command], pty=pty, rows=rows, cols=cols, **kwargs
+        )
+    except BaseException:
+        connection.close()
+        raise
+    with process:
+        status = process.interact(escape=escape)
+    return 130 if status is None else status.returncode
 
 
 class KeystoreSession:

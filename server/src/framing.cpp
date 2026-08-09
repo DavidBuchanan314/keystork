@@ -62,18 +62,54 @@ FrameStatus ReadFrame(int fd, std::string* out) {
   return status == FrameStatus::kEof ? FrameStatus::kTruncated : status;
 }
 
+void EncodeFrameHeader(uint32_t length, uint8_t header[4]) {
+  header[0] = static_cast<uint8_t>(length >> 24);
+  header[1] = static_cast<uint8_t>(length >> 16);
+  header[2] = static_cast<uint8_t>(length >> 8);
+  header[3] = static_cast<uint8_t>(length);
+}
+
 bool WriteFrame(int fd, const std::string& payload) {
   if (payload.size() > kMaxFrameBytes) return false;
 
-  const uint32_t len = static_cast<uint32_t>(payload.size());
-  const uint8_t header[4] = {
-      static_cast<uint8_t>(len >> 24),
-      static_cast<uint8_t>(len >> 16),
-      static_cast<uint8_t>(len >> 8),
-      static_cast<uint8_t>(len),
-  };
+  uint8_t header[4];
+  EncodeFrameHeader(static_cast<uint32_t>(payload.size()), header);
   if (!WriteFully(fd, header, sizeof(header))) return false;
   return payload.empty() || WriteFully(fd, payload.data(), payload.size());
+}
+
+void FrameBuffer::Append(const void* data, size_t length) {
+  // Reclaim what has already been handed out before growing, so a long-lived
+  // stream does not keep every frame it ever carried.
+  if (head_ > 0 && head_ == buffer_.size()) {
+    buffer_.clear();
+    head_ = 0;
+  } else if (head_ > buffer_.size() / 2) {
+    buffer_.erase(0, head_);
+    head_ = 0;
+  }
+  buffer_.append(static_cast<const char*>(data), length);
+}
+
+bool FrameBuffer::Next(std::string* out) {
+  if (over_limit_) return false;
+
+  const size_t available = buffer_.size() - head_;
+  if (available < 4) return false;
+
+  const auto* p = reinterpret_cast<const uint8_t*>(buffer_.data()) + head_;
+  const uint32_t length = (static_cast<uint32_t>(p[0]) << 24) |
+                          (static_cast<uint32_t>(p[1]) << 16) |
+                          (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+  if (length > kMaxFrameBytes) {
+    over_limit_ = true;
+    return false;
+  }
+  if (available - 4 < length) return false;
+
+  out->assign(buffer_, head_ + 4, length);
+  head_ += 4 + length;
+  return true;
 }
 
 const char* ToString(FrameStatus status) {

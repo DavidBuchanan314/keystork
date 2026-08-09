@@ -1,8 +1,14 @@
 """Length-prefixed protobuf framing over a stream socket.
 
 Frames are a 4-byte big-endian length followed by that many bytes of serialized
-protobuf. The exchange is strictly synchronous -- one request, one response --
-so this is deliberately a blocking, unmultiplexed transport.
+protobuf. Commands and keystore requests are strictly synchronous -- one
+request, one response -- so :class:`Transport` is deliberately blocking and
+unmultiplexed.
+
+The exec subprotocol is the exception: both sides send unprompted, so it cannot
+block on either. :class:`FrameReader` and :func:`encode_frame` are the same
+framing with the socket left to the caller, which is what
+:mod:`keystork.process` selects on.
 """
 
 from __future__ import annotations
@@ -16,6 +22,53 @@ from .errors import ConnectionClosed, ProtocolError
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 _HEADER = struct.Struct(">I")
+
+
+def encode_frame(payload: bytes) -> bytes:
+    """One framed message, ready to be written."""
+    if len(payload) > MAX_FRAME_BYTES:
+        raise ProtocolError(
+            f"message of {len(payload)} bytes exceeds the {MAX_FRAME_BYTES}-byte frame limit"
+        )
+    return _HEADER.pack(len(payload)) + payload
+
+
+class FrameReader:
+    """The framing, decoupled from the read.
+
+    Bytes go in as they arrive off a non-blocking socket and whole frames come
+    out, so a caller that must also watch other descriptors is never left
+    sitting inside a read waiting for the rest of a message.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def feed(self, data: bytes) -> None:
+        self._buffer += data
+
+    def __iter__(self):
+        """Every whole frame buffered right now, consuming as it goes."""
+        while True:
+            if len(self._buffer) < _HEADER.size:
+                return
+            (length,) = _HEADER.unpack_from(self._buffer)
+            if length > MAX_FRAME_BYTES:
+                raise ProtocolError(
+                    f"daemon announced a {length}-byte frame, "
+                    f"over the {MAX_FRAME_BYTES}-byte limit"
+                )
+            end = _HEADER.size + length
+            if len(self._buffer) < end:
+                return
+            frame = bytes(self._buffer[_HEADER.size : end])
+            del self._buffer[:end]
+            yield frame
+
+    @property
+    def partial(self) -> bool:
+        """Whether bytes are buffered that do not yet make up a frame."""
+        return bool(self._buffer)
 
 
 class Transport:
@@ -66,6 +119,17 @@ class Transport:
                 sock.close()
             except OSError:
                 pass
+
+    def detach(self) -> socket.socket:
+        """Hand the socket to someone else, still open.
+
+        Used when a connection stops being a sequence of framed round-trips --
+        an exec session, whose two directions run independently. This transport
+        is spent afterwards and closing it is a no-op.
+        """
+        sock = self._require_open()
+        self._sock = None
+        return sock
 
     def _require_open(self) -> socket.socket:
         if self._sock is None:

@@ -3,6 +3,7 @@
     keystork keystore --uid 10123 list
     keystork keystore --uid 10123 info my_key
     keystork keystore --uid 10123 sign my_key --text hello > sig
+    keystork shell
     keystork kill-server
 
 Crypto output is raw bytes on stdout so it pipes; pass ``--hex`` for a
@@ -13,15 +14,18 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import os
 import sys
 from typing import List, Optional, Sequence
 
 from . import errors
 from .enums import BlockMode, Digest, Domain, KeyPurpose, PaddingMode, Tag, name_of
+from .process import ESCAPE, local_window, stdin_is_tty
 from .session import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
+    DEVICE_SHELL,
     Connection,
     Device,
     KeyDescriptor,
@@ -88,6 +92,86 @@ def _add_parameter_args(parser: argparse.ArgumentParser, *, symmetric: bool) -> 
             "output and decrypt takes it back off. Give it when the ciphertext came from "
             "somewhere that did not.",
         )
+
+
+def _parse_escape(text: str) -> Optional[int]:
+    """``^]`` caret notation, a bare character, or ``none``."""
+    if text.lower() in ("none", "off"):
+        return None
+    if len(text) == 2 and text[0] == "^":
+        # The usual mapping: ^A is 1, ^] is 0x1d, ^? is DEL.
+        return ord(text[1].upper()) ^ 0x40
+    if len(text) == 1 and ord(text) < 0x100:
+        return ord(text)
+    raise argparse.ArgumentTypeError(
+        f"{text!r} is not a single character, a ^X escape, or 'none'"
+    )
+
+
+def _describe_escape(byte: int) -> str:
+    if byte < 0x20:
+        return "^" + chr(byte + 0x40)
+    if byte == 0x7F:
+        return "^?"
+    return chr(byte)
+
+
+def _add_process_args(parser: argparse.ArgumentParser) -> None:
+    """How a process is run. Shared by ``shell`` and ``exec``."""
+    identity = parser.add_mutually_exclusive_group()
+    identity.add_argument("--uid", type=int, help="run as this UID (default: root)")
+    identity.add_argument(
+        "--package", help="run as this package's UID, resolved over the same connection"
+    )
+    parser.add_argument(
+        "--user", type=int, default=0, help="Android user id for --package (default: 0)"
+    )
+    parser.add_argument("--gid", type=int, help="run as this GID (default: whatever --uid is)")
+    parser.add_argument(
+        "--group",
+        dest="groups",
+        metavar="GID",
+        type=int,
+        action="append",
+        default=[],
+        help="supplementary group; repeatable. Default is the primary GID alone",
+    )
+    parser.add_argument("--cwd", metavar="DIR", help="chdir here before exec")
+    parser.add_argument(
+        "-e",
+        "--env",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="add to the daemon's environment, replacing an existing key; repeatable",
+    )
+    parser.add_argument(
+        "-E",
+        "--clear-env",
+        action="store_true",
+        help="start from an empty environment rather than the daemon's",
+    )
+    terminal = parser.add_mutually_exclusive_group()
+    terminal.add_argument(
+        "-t",
+        dest="tty",
+        action="store_true",
+        default=None,
+        help="allocate a pty even when the default would not",
+    )
+    terminal.add_argument(
+        "-T", dest="tty", action="store_false", help="never allocate a pty"
+    )
+    parser.add_argument(
+        "--escape",
+        type=_parse_escape,
+        default=ESCAPE,
+        metavar="CHAR",
+        help=f"key that ends a raw-mode session, in caret notation "
+        f"(default: {_describe_escape(ESCAPE)}; 'none' to disable). Only ever read while "
+        "the local terminal is raw, since that is the only time it is a keystroke rather "
+        "than data",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -195,6 +279,38 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "packages",
         help="list the device's packages and the UIDs they run as",
+    )
+
+    shell = commands.add_parser(
+        "shell",
+        help="run a shell on the device",
+        description=f"Runs {DEVICE_SHELL}, as root unless told otherwise. With no COMMAND "
+        "this is an interactive session on a pty, with the local terminal in raw mode so "
+        "the remote line discipline sees every keystroke -- ^C included. With one, the "
+        "arguments are joined with spaces and handed to `sh -c`, on pipes rather than a "
+        "pty unless -t. Exits with the command's own status.",
+    )
+    _add_process_args(shell)
+    shell.add_argument(
+        # Not `command`: the subparsers already own that destination, and
+        # argparse would quietly overwrite the subcommand's own name with this.
+        "command_words",
+        metavar="COMMAND",
+        nargs=argparse.REMAINDER,
+        help="what to run; joined with spaces and passed to `sh -c`",
+    )
+
+    execing = commands.add_parser(
+        "exec",
+        help="run one program on the device, with no shell in the way",
+        description="execve on the device: PATH is used exactly as given, with no PATH "
+        "search, no word splitting and no globbing. Prefer this over `shell` whenever the "
+        "arguments come from anywhere but a person.",
+    )
+    _add_process_args(execing)
+    execing.add_argument("path", help="absolute path to the program")
+    execing.add_argument(
+        "args", nargs=argparse.REMAINDER, help="arguments after argv[0], which is PATH"
     )
 
     commands.add_parser(
@@ -368,6 +484,68 @@ def _run(session: KeystoreSession, args: argparse.Namespace) -> int:
     raise errors.KeystorkError(f"unimplemented operation {args.operation!r}")
 
 
+def _run_process(device: Device, args: argparse.Namespace, path: str, argv: List[str]) -> int:
+    """Start a process and join the local stdio to it until it exits."""
+    pty = args.tty
+    if pty is None:
+        # adb's rule, and for the same reason: a pty is what makes an
+        # interactive session work and what corrupts a redirected one.
+        pty = args.interactive_default
+
+    env = list(args.env)
+    if pty and not any(entry.startswith("TERM=") for entry in env):
+        env.append("TERM=" + os.environ.get("TERM", "xterm-256color"))
+    rows, cols = local_window()
+
+    connection = Connection(device)
+    try:
+        uid = args.uid
+        if args.package is not None:
+            uid = connection.resolve_package(args.package, args.user)
+        process = connection.exec(
+            path,
+            argv,
+            env=env,
+            clear_env=args.clear_env,
+            cwd=args.cwd,
+            uid=uid,
+            gid=args.gid,
+            groups=args.groups,
+            pty=pty,
+            rows=rows,
+            cols=cols,
+        )
+    except BaseException:
+        connection.close()
+        raise
+
+    with process:
+        if args.verbose:
+            who = f"uid={uid}" if uid is not None else "root"
+            print(
+                f"pid {process.pid} as {who}{', pty' if process.pty else ''}",
+                file=sys.stderr,
+            )
+        # Raw mode is where the escape is both live and needed, and where the
+        # user has no other way out -- so that is where it gets announced.
+        if process.pty and stdin_is_tty() and args.escape is not None:
+            print(
+                f"keystork: '{_describe_escape(args.escape)}' disconnects "
+                "(and kills the remote process)",
+                file=sys.stderr,
+            )
+        status = process.interact(escape=args.escape)
+
+    if status is None:
+        # The terminal is out of raw mode by now, but the remote left the
+        # cursor mid-prompt, so start a line of our own.
+        print("\nkeystork: disconnected", file=sys.stderr)
+        return 130
+    if args.verbose:
+        print(f"pid {process.pid} {status}", file=sys.stderr)
+    return status.returncode
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     device = Device(args.host, args.port, args.timeout)
@@ -391,6 +569,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for name in sorted(packages):
                 print(f"{packages[name]}\t{name}")
             return 0
+
+        if args.command == "shell":
+            if args.command_words:
+                # Joined with spaces, as adb does: `sh -c` re-splits it, which
+                # is the whole point of asking for a shell.
+                shell_argv = ["sh", "-c", " ".join(args.command_words)]
+                args.interactive_default = False
+            else:
+                shell_argv = ["sh"]
+                args.interactive_default = stdin_is_tty()
+            return _run_process(device, args, DEVICE_SHELL, shell_argv)
+
+        if args.command == "exec":
+            args.interactive_default = False
+            return _run_process(device, args, args.path, [args.path] + args.args)
 
         with KeystoreSession(
             args.uid, device, package=args.package, user=args.user

@@ -10,16 +10,25 @@
 //   client -> Command      \  repeated, strictly synchronous,
 //   server -> CommandResponse /  one in flight at a time
 //
-// open_keystore_session is an explicit, irreversible state change: the daemon
-// drops to the session's UID and the connection enters the keystore
-// subprotocol, where only keystore messages are valid for the rest of its life.
+// Two commands hand the connection over to a subprotocol and never give it
+// back. open_keystore_session drops to the session's UID -- the connection
+// becomes a keystore session, strictly synchronous like the top level:
 //
 //   client -> KeystoreRequest   \
 //   server -> KeystoreResponse  /
 //
-// There is no way back, and no second session on the same connection: the UID
-// drop cannot be undone. Reading files is a top-level command precisely because
-// it always runs as root, which is only true before that drop.
+// exec starts a process -- the connection becomes its stdio, and is the one
+// place in this protocol where messages are *not* paired. Either side sends
+// whenever it has something to say, until the process exits:
+//
+//   client -> ExecInput   (stdin, resize, signal; any time, any number)
+//   server -> ExecEvent   (output, exit; any time, any number)
+//
+// There is no way back from either, and no second session on the same
+// connection: the UID drop cannot be undone, and a connection carrying a
+// process's stdio has nothing left to say a command in. Reading files is a
+// top-level command precisely because it always runs as root, which is only
+// true before that point.
 //
 // Modeling rules (see design_docs/keystore-over-ip-design.md §4):
 //   - The wire speaks KeyMint's raw integers. Enums from keystore2/KeyMint are
@@ -64,8 +73,9 @@ message Error {
     PROTOCOL = 3;
 
     // A command failed for a reason outside keystore2: a privilege drop that
-    // would not take, a file that could not be read, an unreachable keystore2
-    // service. `code` is an errno where one applies, otherwise 0.
+    // would not take, a file that could not be read, a binary that could not
+    // be exec'd, an unreachable keystore2 service. `code` is an errno where
+    // one applies, otherwise 0.
     IDENTITY = 4;
   }
 
@@ -105,6 +115,7 @@ message Command {
     ReadFileRequest read_file = 1;
     KillServerRequest kill_server = 2;
     OpenKeystoreSessionRequest open_keystore_session = 3;
+    ExecRequest exec = 4;
   }
 }
 
@@ -114,6 +125,7 @@ message CommandResponse {
     ReadFileResponse read_file = 2;
     KillServerResponse kill_server = 3;
     KeystoreSessionOpened open_keystore_session = 4;
+    ExecStarted exec = 5;
   }
 }
 
@@ -163,6 +175,141 @@ message KeystoreSessionOpened {
   // is V3, that call needs V5" rather than surfacing a bare
   // UNKNOWN_TRANSACTION.
   int32 keystore_interface_version = 1;
+}
+
+// The other state change. execve on the device, as any UID and GID, with the
+// process's stdio carried on this connection for the rest of its life.
+//
+// Nothing here is a shell: `path` is passed to execve unchanged, with no PATH
+// search, no word splitting and no globbing. Run `sh -c` explicitly to get any
+// of that.
+//
+// The daemon is root when this runs, so it can become any identity -- but
+// unlike open_keystore_session it does *not* drop the session's own
+// privileges. The credentials below apply to the child alone, which is a
+// different process; this connection simply stops being able to say anything
+// but stdin once the child is running.
+message ExecRequest {
+  // Absolute path to execve. Not searched for, not interpreted.
+  string path = 1;
+
+  // The full argv, argv[0] included. Empty means argv = [path], which is the
+  // conventional default and almost never what a shell would have produced.
+  repeated string argv = 2;
+
+  // KEY=VALUE entries applied on top of the daemon's own environment,
+  // replacing any key already there. Set clear_env to start from nothing
+  // instead. An entry with no '=' is rejected.
+  repeated string env = 3;
+
+  // Start from an empty environment rather than the daemon's.
+  bool clear_env = 4;
+
+  // chdir before execve. Unset keeps the daemon's, which is "/" once it has
+  // daemonized.
+  optional string cwd = 5;
+
+  // Unset runs as root. Setting uid without gid uses uid for both, matching
+  // Android's app convention where the two are the same number.
+  optional uint32 uid = 6;
+  optional uint32 gid = 7;
+
+  // Supplementary groups. Empty means just the primary GID -- root's
+  // supplementary groups are dropped either way, since inheriting them would
+  // leave the child with more access than the UID it claims. Ignored entirely
+  // when neither uid nor gid is set.
+  repeated uint32 groups = 8;
+
+  // Present means allocate a pty and give the child a controlling terminal,
+  // with this initial size. Absent means three pipes and no terminal, so the
+  // child's isatty() is false and stderr stays a stream of its own.
+  optional WindowSize pty = 9;
+}
+
+message WindowSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+// The child is running. From here the connection carries ExecInput one way and
+// ExecEvent the other.
+//
+// A child that could not be set up or could not execve is *not* this: the
+// child reports the errno back through a close-on-exec pipe before the daemon
+// answers, so a bad path is an ordinary Error and the connection stays at the
+// top level.
+message ExecStarted {
+  // On the device, and also the process group -- the child is given its own,
+  // so a signal reaches everything it started.
+  int32 pid = 1;
+
+  // Echoes whether a pty was allocated, so a client that left the choice to a
+  // default knows which it got.
+  bool pty = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Exec subprotocol
+//
+// Unpaired in both directions: neither side answers the other, and neither
+// waits. Valid only after exec succeeded, and the only thing valid from then
+// on.
+// ---------------------------------------------------------------------------
+
+message ExecInput {
+  oneof body {
+    // Bytes for the child's stdin. Not named `stdin`: that is a macro in
+    // <stdio.h>, and protoc does not rename around macros.
+    bytes stdin_data = 1;
+
+    // No more stdin will follow. Without a pty this closes the child's stdin,
+    // which is what makes a `cat` finish. With one there is nothing to close
+    // -- the master stays open both ways -- so the daemon writes EOT (^D)
+    // instead, which the line discipline turns into an EOF in canonical mode.
+    ExecStdinEof stdin_eof = 2;
+
+    // Ignored when there is no pty.
+    WindowSize resize = 3;
+
+    // Sent to the child's whole process group, so `sh -c 'sleep 100'` dies
+    // with its sleep. A pty client normally has no use for this: ^C is a byte
+    // like any other and the line discipline raises the signal itself.
+    uint32 signal = 4;
+  }
+}
+
+message ExecStdinEof {}
+
+message ExecEvent {
+  oneof body {
+    ExecOutput output = 1;
+    ExecExit exit = 2;
+
+    // Something went wrong on the daemon's side of the pump. Terminal: no
+    // further events follow.
+    Error error = 3;
+  }
+}
+
+message ExecOutput {
+  enum Stream {
+    // A pty has only one stream, and it arrives as STDOUT.
+    STREAM_STDOUT = 0;
+    STREAM_STDERR = 1;
+  }
+
+  Stream stream = 1;
+  bytes data = 2;
+}
+
+// The last event. Sent once the child has exited *and* its output has been
+// drained, so nothing is lost to the race between the two; the daemon closes
+// the connection immediately after.
+message ExecExit {
+  oneof status {
+    uint32 exit_code = 1;
+    uint32 term_signal = 2;
+  }
 }
 
 // ---------------------------------------------------------------------------

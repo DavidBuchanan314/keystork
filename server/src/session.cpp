@@ -32,6 +32,7 @@
 #include <aidl/android/system/keystore2/KeyDescriptor.h>
 #include <aidl/android/system/keystore2/KeyEntryResponse.h>
 
+#include "exec.h"
 #include "framing.h"
 #include "keystork.pb.h"
 #include "log.h"
@@ -681,9 +682,11 @@ int RunConnection(int fd, pid_t supervisor_pid) {
   if (!SendFrame(fd, greeting)) return 1;
 
   SessionState session;
+  ExecProcess process;
   std::string encoded;
 
-  // Top level: root, one Command at a time, until one opens a session.
+  // Top level: root, one Command at a time, until one hands the connection to
+  // a subprotocol.
   while (session.service == nullptr) {
     const FrameStatus frame_status = ReadFrame(fd, &encoded);
     if (frame_status == FrameStatus::kEof) return 0;
@@ -695,6 +698,7 @@ int RunConnection(int fd, pid_t supervisor_pid) {
     pb::CommandResponse response;
     pb::Command command;
     bool kill_requested = false;
+    bool exec_started = false;
 
     if (!command.ParseFromString(encoded)) {
       FillProtocolError("malformed command", response.mutable_error());
@@ -712,6 +716,23 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           // nothing else, because the UID drop cannot be undone.
           session.service = OpenKeystoreSession(command.open_keystore_session(), &response);
           break;
+        case pb::Command::kExec: {
+          // Also irreversible, for a different reason: on success the
+          // connection becomes the child's stdio, so there is nowhere left to
+          // put a command. A failed exec is an ordinary error and changes
+          // nothing -- the error is built to one side so that the response
+          // carries it only if there is one.
+          pb::Error error;
+          if (StartExec(command.exec(), &process, &error)) {
+            auto* started = response.mutable_exec();
+            started->set_pid(process.pid);
+            started->set_pty(process.pty);
+            exec_started = true;
+          } else {
+            *response.mutable_error() = error;
+          }
+          break;
+        }
         case pb::Command::BODY_NOT_SET:
           // Also what a newer client's unimplemented command looks like here:
           // its field number is unknown to this build, so no arm is set.
@@ -733,6 +754,10 @@ int RunConnection(int fd, pid_t supervisor_pid) {
       }
       return 0;
     }
+
+    // The client has been told the child's pid; everything after this is its
+    // stdio, in both directions and unprompted.
+    if (exec_started) return RunExecSession(fd, &process);
   }
 
   // Keystore subprotocol: only these messages, for the rest of the connection.

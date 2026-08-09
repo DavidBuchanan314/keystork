@@ -29,10 +29,11 @@ class ProtocolError(KeystorkError):
 
 
 class IdentityError(KeystorkError):
-    """The session never started.
+    """A command failed before it could do the thing it was for.
 
-    The daemon could not become the requested UID, or could not reach keystore2
-    once it had. Carries the errno where one applies.
+    The daemon could not become the requested UID, could not reach keystore2
+    once it had, could not read a file, or could not exec a program. Carries
+    the errno where one applies.
     """
 
     def __init__(self, message: str, errno: int = 0) -> None:

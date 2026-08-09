@@ -10,4 +10,5 @@ An incomplete list of features:
 
 - KeyStore access, with caller identity impersonation (e.g. assume the identity of any app).
 - Remote file read (like `adb pull`).
-- Play Integrity token extraction.
+- Remote exec (like `adb shell`)
+- Play Integrity token extraction (TODO).

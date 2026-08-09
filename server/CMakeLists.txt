@@ -218,6 +218,7 @@ target_compile_options(keystore_aidl PRIVATE -w)
 
 add_executable(keystorkd
     src/main.cpp
+    src/exec.cpp
     src/framing.cpp
     src/session.cpp
     src/status.cpp
