@@ -12,13 +12,20 @@ VERDICT_URL = "https://integrity.1nikolas.dev/api/check"
 device = keystork.Device(host="127.0.0.1", port=9432)
 
 nonce = base64.urlsafe_b64encode(os.urandom(32)).decode()
+print("nonce:")
+print(nonce)
 
+print()
+
+print("token:")
 with device.connect() as connection:
     with connection.open_integrity_session(package=PACKAGE) as integrity:
-        print(f"{PACKAGE} is pid {integrity.pid}, uid {integrity.uid}")
         token = integrity.classic(nonce)
+        print(token)
 
-print("token:", token)
+print()
+
+print("verdict:")
 verdict = requests.get(VERDICT_URL, params={"token": token}, timeout=30)
 verdict.raise_for_status()
 decoded = verdict.json()
