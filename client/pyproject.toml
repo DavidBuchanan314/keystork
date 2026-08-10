@@ -13,6 +13,9 @@ dependencies = [
     # Generated with protoc 3.19.6; the generated module asserts on a runtime
     # older than its generator.
     "protobuf>=3.19",
+    # Reads the key attestation extension. Pure Python, so installing this
+    # client next to adb still needs no compiler.
+    "asn1crypto>=1.5",
 ]
 
 [project.scripts]

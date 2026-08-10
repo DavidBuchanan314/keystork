@@ -31,6 +31,7 @@
 #include <aidl/android/system/keystore2/IKeystoreService.h>
 #include <aidl/android/system/keystore2/KeyDescriptor.h>
 #include <aidl/android/system/keystore2/KeyEntryResponse.h>
+#include <aidl/android/system/keystore2/KeyMetadata.h>
 
 #include "exec.h"
 #include "framing.h"
@@ -56,6 +57,7 @@ using ::aidl::android::system::keystore2::IKeystoreSecurityLevel;
 using ::aidl::android::system::keystore2::IKeystoreService;
 using ::aidl::android::system::keystore2::KeyDescriptor;
 using ::aidl::android::system::keystore2::KeyEntryResponse;
+using ::aidl::android::system::keystore2::KeyMetadata;
 
 constexpr char kKeystoreServiceName[] = "android.system.keystore2.IKeystoreService/default";
 
@@ -373,6 +375,28 @@ void HandleList(IKeystoreService* service, const pb::ListRequest& request, pb::K
   for (const auto& entry : entries) ToWire(entry, list->add_entries());
 }
 
+// Shared by getKeyEntry and generateKey, which answer with the same thing: one
+// says how a key was generated, the other says it while generating it. For an
+// attested generation the certificate chain below is the attestation.
+void ToWire(const KeyMetadata& in, pb::KeyMetadata* out) {
+  ToWire(in.key, out->mutable_key());
+  out->set_key_security_level(static_cast<int32_t>(in.keySecurityLevel));
+  out->set_modification_time_ms(in.modificationTimeMs);
+
+  for (const auto& authorization : in.authorizations) {
+    auto* entry = out->add_authorizations();
+    entry->set_security_level(static_cast<int32_t>(authorization.securityLevel));
+    ToWire(authorization.keyParameter, entry->mutable_parameter());
+  }
+
+  if (in.certificate.has_value()) {
+    out->set_certificate(in.certificate->data(), in.certificate->size());
+  }
+  if (in.certificateChain.has_value()) {
+    out->set_certificate_chain(in.certificateChain->data(), in.certificateChain->size());
+  }
+}
+
 // getKeyEntry also hands back an IKeystoreSecurityLevel; that handle stays here
 // (§3.6) and only the metadata goes on the wire.
 void HandleGetKeyEntry(IKeystoreService* service, const pb::GetKeyEntryRequest& request,
@@ -383,26 +407,20 @@ void HandleGetKeyEntry(IKeystoreService* service, const pb::GetKeyEntryRequest& 
     FillError(status, response->mutable_error());
     return;
   }
+  ToWire(entry.metadata, response->mutable_get_key_entry()->mutable_metadata());
+}
 
-  auto* metadata = response->mutable_get_key_entry()->mutable_metadata();
-  ToWire(entry.metadata.key, metadata->mutable_key());
-  metadata->set_key_security_level(static_cast<int32_t>(entry.metadata.keySecurityLevel));
-  metadata->set_modification_time_ms(entry.metadata.modificationTimeMs);
-
-  for (const auto& authorization : entry.metadata.authorizations) {
-    auto* out = metadata->add_authorizations();
-    out->set_security_level(static_cast<int32_t>(authorization.securityLevel));
-    ToWire(authorization.keyParameter, out->mutable_parameter());
+// deleteKey. On IKeystoreService rather than a security level: keystore2 finds
+// the entry by descriptor and knows which backend holds it. The KeyMint blob
+// goes with the entry, so there is nothing left afterwards and nothing to undo.
+void HandleDeleteKey(IKeystoreService* service, const pb::DeleteKeyRequest& request,
+                     pb::KeystoreResponse* response) {
+  const auto status = service->deleteKey(FromWire(request.key()));
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
   }
-
-  if (entry.metadata.certificate.has_value()) {
-    metadata->set_certificate(entry.metadata.certificate->data(),
-                              entry.metadata.certificate->size());
-  }
-  if (entry.metadata.certificateChain.has_value()) {
-    metadata->set_certificate_chain(entry.metadata.certificateChain->data(),
-                                    entry.metadata.certificateChain->size());
-  }
+  response->mutable_delete_key();
 }
 
 // Everything a session carries between round-trips. The operation handle is the
@@ -449,6 +467,55 @@ std::shared_ptr<IKeystoreSecurityLevel> SecurityLevelFor(SessionState* session, 
   return handle;
 }
 
+// Fills `response` with whatever went wrong reaching a security level, for the
+// two calls that need one. A null handle with an ok status is keystore2
+// answering a level it does not have, which is not an error it reports.
+void FillSecurityLevelError(const ::ndk::ScopedAStatus& status, int32_t level,
+                            pb::KeystoreResponse* response) {
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+  FillProtocolError("keystore2 returned no security level for " + std::to_string(level),
+                    response->mutable_error());
+}
+
+// generateKey. Attestation is not a separate call: a parameter list carrying
+// ATTESTATION_CHALLENGE comes back with a certificate chain, and one without
+// comes back with a self-signed leaf and no chain. Either way the daemon does
+// not read the parameters -- what a key needs is KeyMint's business.
+//
+// keystore2 adds ATTESTATION_APPLICATION_ID itself, from the calling UID's
+// package and signing certificate. That is why this has to run inside the
+// session's dropped child rather than as root, and why attesting as a UID with
+// no package installed fails in keystore2 rather than here.
+void HandleGenerateKey(SessionState* session, const pb::GenerateKeyRequest& request,
+                       pb::KeystoreResponse* response) {
+  ::ndk::ScopedAStatus status;
+  auto level = SecurityLevelFor(session, request.security_level(), &status);
+  if (level == nullptr) {
+    FillSecurityLevelError(status, request.security_level(), response);
+    return;
+  }
+
+  std::vector<KeyParameter> parameters;
+  parameters.reserve(static_cast<size_t>(request.parameters_size()));
+  for (const auto& parameter : request.parameters()) parameters.push_back(FromWire(parameter));
+
+  std::optional<KeyDescriptor> attestation_key;
+  if (request.has_attestation_key()) attestation_key = FromWire(request.attestation_key());
+
+  KeyMetadata metadata;
+  status = level->generateKey(FromWire(request.key()), attestation_key, parameters,
+                              request.flags(), Bytes(request.entropy()), &metadata);
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+
+  ToWire(metadata, response->mutable_generate_key()->mutable_metadata());
+}
+
 // createOperation, shared by run_operation and op_begin. On failure it fills
 // `response` with the error and returns null; `begun` is a local the caller
 // copies into the response only once the whole call has succeeded, so a later
@@ -460,13 +527,7 @@ std::shared_ptr<IKeystoreOperation> BeginOperation(SessionState* session,
   ::ndk::ScopedAStatus status;
   auto level = SecurityLevelFor(session, start.security_level(), &status);
   if (level == nullptr) {
-    if (!status.isOk()) {
-      FillError(status, response->mutable_error());
-    } else {
-      FillProtocolError("keystore2 returned no security level for " +
-                            std::to_string(start.security_level()),
-                        response->mutable_error());
-    }
+    FillSecurityLevelError(status, start.security_level(), response);
     return nullptr;
   }
 
@@ -945,6 +1006,12 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           break;
         case pb::KeystoreRequest::kGetKeyEntry:
           HandleGetKeyEntry(session.service.get(), request.get_key_entry(), &response);
+          break;
+        case pb::KeystoreRequest::kGenerateKey:
+          HandleGenerateKey(&session, request.generate_key(), &response);
+          break;
+        case pb::KeystoreRequest::kDeleteKey:
+          HandleDeleteKey(session.service.get(), request.delete_key(), &response);
           break;
         case pb::KeystoreRequest::kRunOperation:
           HandleRunOperation(&session, request.run_operation(), &response);

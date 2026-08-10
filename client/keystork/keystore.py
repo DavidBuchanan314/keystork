@@ -16,9 +16,10 @@ authorizations so a caller need not repeat them -- happens here.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Dict, Iterator, List, Mapping, Optional, Sequence, Union
 
 from . import errors
 from ._proto import keystork_pb2 as pb
@@ -39,6 +40,7 @@ from .enums import (
 )
 
 if TYPE_CHECKING:
+    from .attestation import Attestation
     from .connection import Connection
 
 # Minimum keystore2 interface version each call needs. The daemon is built
@@ -213,6 +215,43 @@ class OperationResult:
         return self.begun.nonce
 
 
+def _split_der(blob: bytes) -> List[bytes]:
+    """Split concatenated DER certificates, which carry their own lengths.
+
+    Enough ASN.1 to find where each one ends and no more: a certificate is a
+    SEQUENCE, so the first byte is 0x30 and the next is either a short length or
+    a count of the bytes that hold the long one. Anything that does not look
+    like a certificate ends the walk rather than raising -- a chain this cannot
+    read is worth returning in part, since the leaf comes first.
+    """
+    certificates: List[bytes] = []
+    offset = 0
+    while offset < len(blob):
+        if blob[offset] != 0x30 or offset + 2 > len(blob):
+            break
+        first = blob[offset + 1]
+        if first < 0x80:
+            header, length = 2, first
+        else:
+            count = first & 0x7F
+            if count == 0 or offset + 2 + count > len(blob):
+                break
+            header = 2 + count
+            length = int.from_bytes(blob[offset + 2 : offset + 2 + count], "big")
+        end = offset + header + length
+        if end > len(blob):
+            break
+        certificates.append(blob[offset:end])
+        offset = end
+    return certificates
+
+
+def _pem(der: bytes) -> str:
+    body = base64.b64encode(der).decode("ascii")
+    lines = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----\n"
+
+
 @dataclass(frozen=True)
 class Authorization:
     """One authorization: a parameter and the level that enforces it."""
@@ -311,6 +350,64 @@ class KeyMetadata:
         return self.has(Tag.CALLER_NONCE)
 
     @property
+    def origin(self) -> Optional[int]:
+        """Where the key material came from -- GENERATED, IMPORTED, UNKNOWN.
+
+        A `KeyOrigin.GENERATED` at a hardware security level is the claim an
+        attestation is there to back: the private key was made inside the
+        secure hardware and has never been outside it.
+        """
+        value = self.value_of(Tag.ORIGIN)
+        return int(value) if value is not None else None
+
+    @property
+    def attested(self) -> bool:
+        """Whether this key came back with an attestation chain behind it.
+
+        True only for a generation that named an `Tag.ATTESTATION_CHALLENGE`.
+        An asymmetric key generated without one still has a `certificate` --
+        self-signed, vouching for nothing.
+        """
+        return bool(self.certificate_chain)
+
+    @property
+    def certificates(self) -> List[bytes]:
+        """The whole chain as separate DER certificates, leaf first.
+
+        `certificate` and `certificate_chain` arrive as keystore2 hands them
+        over: the leaf on its own, and the rest concatenated with no framing,
+        because DER carries its own length. This is that undone -- the list an
+        attestation is actually verified against, from the leaf holding the
+        attestation extension up to a root you can pin against Google's
+        published attestation roots.
+        """
+        return _split_der(self.certificate or b"") + _split_der(self.certificate_chain or b"")
+
+    @property
+    def attestation(self) -> Optional["Attestation"]:
+        """The leaf's parsed attestation extension, or None if it has none.
+
+        None for a key generated without a challenge, and for every symmetric
+        key. See `keystork.attestation` -- this parses, it does not verify.
+        """
+        # Imported here rather than at the top: attestation builds the
+        # KeyParameters above, so the dependency runs that way and not this.
+        from .attestation import parse
+
+        certificates = self.certificates
+        return parse(certificates[0]) if certificates else None
+
+    def pem_chain(self) -> str:
+        """`certificates` as PEM, which is what every other tool wants.
+
+        >>> Path("chain.pem").write_text(metadata.pem_chain())
+
+        Then, for instance, `openssl x509 -in chain.pem -text` to read the leaf,
+        whose attestation extension is OID 1.3.6.1.4.1.11129.2.1.17.
+        """
+        return "".join(_pem(der) for der in self.certificates)
+
+    @property
     def auth_required(self) -> bool:
         """Whether the key is auth-bound, which this client cannot satisfy."""
         return not self.has(Tag.NO_AUTH_REQUIRED)
@@ -396,6 +493,99 @@ def operation_parameters(
         parameters.append(KeyParameter(Tag.NONCE, bytes(nonce)))
     if mac_length is not None:
         parameters.append(KeyParameter(Tag.MAC_LENGTH, int(mac_length)))
+    parameters.extend(extra)
+    return parameters
+
+
+# Key size in bits when an algorithm needs one and the caller did not say. EC
+# takes its size from the curve instead, so it is absent here.
+DEFAULT_KEY_SIZES = {
+    Algorithm.RSA: 2048,
+    Algorithm.AES: 256,
+    Algorithm.HMAC: 256,
+    Algorithm.TRIPLE_DES: 168,
+}
+
+# RSA's public exponent. 65537 is the only value KeyMint accepts.
+RSA_PUBLIC_EXPONENT = 65537
+
+
+def generation_parameters(
+    algorithm: int,
+    purposes: Sequence[int],
+    *,
+    key_size: Optional[int] = None,
+    ec_curve: Optional[int] = None,
+    digests: Sequence[int] = (),
+    paddings: Sequence[int] = (),
+    block_modes: Sequence[int] = (),
+    rsa_public_exponent: Optional[int] = None,
+    min_mac_length: Optional[int] = None,
+    no_auth_required: bool = True,
+    attestation_challenge: Optional[bytes] = None,
+    include_unique_id: bool = False,
+    device_ids: Optional[Mapping[int, bytes]] = None,
+    creation_datetime_ms: Optional[int] = None,
+    extra: Sequence[KeyParameter] = (),
+) -> List[KeyParameter]:
+    """Assemble the parameters for `generate_key`.
+
+    A convenience over building the list by hand, and the same bargain as
+    `operation_parameters`: repeatable tags take a sequence, anything left
+    unset is simply absent, and nothing is second-guessed. The one thing it
+    does supply is a `key_size` for an algorithm that needs one and an
+    `rsa_public_exponent` for RSA, because KeyMint rejects a generation
+    without them and there is only one sensible value.
+
+    `no_auth_required` defaults to True, which is the opposite of KeyMint's
+    default and deliberate: this client cannot satisfy an auth challenge -- that
+    needs IKeystoreAuthorization -- so a key generated without it would be one
+    nothing here could ever use. Pass False to make one anyway.
+
+    `attestation_challenge` is what turns a generation into an attested one.
+    The bytes are yours and reach KeyMint unchanged; they come back inside the
+    leaf certificate's attestation extension, which is what proves the chain was
+    produced for your challenge rather than replayed.
+
+    `device_ids` maps ATTESTATION_ID_* tags to the values you claim the device
+    has -- brand, model, serial, IMEI. KeyMint compares each against what it
+    holds and fails the whole generation on any mismatch, so these are asserted
+    rather than requested, and getting one wrong is how you learn it. Device ID
+    attestation is also privileged: most devices refuse it outright, with
+    CANNOT_ATTEST_IDS.
+    """
+    parameters = [KeyParameter(Tag.ALGORITHM, int(algorithm))]
+    parameters.extend(KeyParameter(Tag.PURPOSE, int(p)) for p in purposes)
+
+    if key_size is None and ec_curve is None:
+        key_size = DEFAULT_KEY_SIZES.get(algorithm)
+    if key_size is not None:
+        parameters.append(KeyParameter(Tag.KEY_SIZE, int(key_size)))
+    if ec_curve is not None:
+        parameters.append(KeyParameter(Tag.EC_CURVE, int(ec_curve)))
+
+    if algorithm == Algorithm.RSA and rsa_public_exponent is None:
+        rsa_public_exponent = RSA_PUBLIC_EXPONENT
+    if rsa_public_exponent is not None:
+        parameters.append(KeyParameter(Tag.RSA_PUBLIC_EXPONENT, int(rsa_public_exponent)))
+
+    parameters.extend(KeyParameter(Tag.DIGEST, int(d)) for d in digests)
+    parameters.extend(KeyParameter(Tag.PADDING, int(p)) for p in paddings)
+    parameters.extend(KeyParameter(Tag.BLOCK_MODE, int(b)) for b in block_modes)
+
+    if min_mac_length is not None:
+        parameters.append(KeyParameter(Tag.MIN_MAC_LENGTH, int(min_mac_length)))
+    if no_auth_required:
+        parameters.append(KeyParameter(Tag.NO_AUTH_REQUIRED))
+    if attestation_challenge is not None:
+        parameters.append(KeyParameter(Tag.ATTESTATION_CHALLENGE, bytes(attestation_challenge)))
+    if include_unique_id:
+        parameters.append(KeyParameter(Tag.INCLUDE_UNIQUE_ID))
+    for tag, value in (device_ids or {}).items():
+        parameters.append(KeyParameter(int(tag), bytes(value)))
+    if creation_datetime_ms is not None:
+        parameters.append(KeyParameter(Tag.CREATION_DATETIME, int(creation_datetime_ms)))
+
     parameters.extend(extra)
     return parameters
 
@@ -611,6 +801,138 @@ class KeystoreSession:
         if cache_key not in self._characteristics:
             self._characteristics[cache_key] = self.get_key_entry(key)
         return self._characteristics[cache_key]
+
+    def delete_key(self, key: KeyRef) -> None:
+        """Delete a key. There is no undo.
+
+        keystore2 has KeyMint delete the blob as well as the entry, so the
+        private key is gone rather than merely unreachable -- which is the point
+        of a hardware-backed key, and why nothing here asks twice.
+
+        Deleting a key that is not there raises `KeystoreError` with
+        `ResponseCode.KEY_NOT_FOUND`, because that is what keystore2 answers.
+        """
+        self._exchange(
+            pb.KeystoreRequest(
+                delete_key=pb.DeleteKeyRequest(key=_key_descriptor(key)._to_wire())
+            )
+        )
+        self._characteristics.pop(str(_key_descriptor(key)), None)
+
+    # -- generation ---------------------------------------------------------
+
+    def generate_key(
+        self,
+        key: KeyRef,
+        parameters: Sequence[KeyParameter],
+        *,
+        attestation_key: Optional[KeyRef] = None,
+        flags: int = 0,
+        entropy: bytes = b"",
+        security_level: int = SecurityLevel.TRUSTED_ENVIRONMENT,
+    ) -> KeyMetadata:
+        """Generate a key under `key` and return its metadata.
+
+        The low-level form: `parameters` is passed to KeyMint exactly as given,
+        so it must name at least an ALGORITHM and a PURPOSE.
+        `generation_parameters` builds a well-formed list, and
+        `generate_key_pair` is the whole thing in one call.
+
+        `attestation_key` signs the attestation with a key of your own instead
+        of the factory batch key. It must itself have been generated with
+        `KeyPurpose.ATTEST_KEY`, and the chain then roots in that key's own
+        attestation rather than directly in the manufacturer's.
+
+        `entropy` is stirred into KeyMint's RNG rather than trusted as it, so
+        there is no way to make a key predictable with it, and no reason to
+        pass any.
+        """
+        request = pb.GenerateKeyRequest(
+            key=_key_descriptor(key)._to_wire(),
+            flags=flags,
+            entropy=bytes(entropy),
+            security_level=int(security_level),
+        )
+        if attestation_key is not None:
+            request.attestation_key.CopyFrom(_key_descriptor(attestation_key)._to_wire())
+        for parameter in parameters:
+            request.parameters.append(parameter._to_wire())
+
+        response = self._exchange(pb.KeystoreRequest(generate_key=request))
+        metadata = KeyMetadata._from_wire(response.generate_key.metadata)
+
+        # The alias now names a different key, so anything cached under it is
+        # about the one that was there before.
+        self._characteristics.pop(str(_key_descriptor(key)), None)
+        return metadata
+
+    def generate_key_pair(
+        self,
+        key: KeyRef,
+        *,
+        algorithm: int = Algorithm.EC,
+        purposes: Sequence[int] = (KeyPurpose.SIGN, KeyPurpose.VERIFY),
+        key_size: Optional[int] = None,
+        ec_curve: Optional[int] = None,
+        digests: Sequence[int] = (Digest.SHA_2_256,),
+        paddings: Sequence[int] = (),
+        attestation_challenge: Optional[bytes] = None,
+        device_ids: Optional[Mapping[int, bytes]] = None,
+        include_unique_id: bool = False,
+        no_auth_required: bool = True,
+        attestation_key: Optional[KeyRef] = None,
+        security_level: int = SecurityLevel.TRUSTED_ENVIRONMENT,
+        extra: Sequence[KeyParameter] = (),
+        **kwargs,
+    ) -> KeyMetadata:
+        """Generate an asymmetric key, attesting it when given a challenge.
+
+        The ordinary case in one call. Defaults to a P-256 EC signing key,
+        which is what almost everything wants:
+
+        >>> metadata = ks.generate_key_pair("my_key", attestation_challenge=os.urandom(32))
+        >>> metadata.attested
+        True
+        >>> len(metadata.certificates)
+        4
+
+        With `attestation_challenge` the chain runs from the leaf -- whose
+        attestation extension carries the challenge, the key's own
+        authorizations and the device's verified-boot state -- up to a root the
+        manufacturer provisioned, which Google publishes for its own devices.
+        Without one the key still gets a self-signed leaf and no chain, which
+        proves nothing about where the key lives.
+
+        An EC key takes its size from `ec_curve` and ignores `key_size`; RSA
+        defaults to 2048 bits with the only public exponent KeyMint allows.
+        `paddings` matters for RSA, which refuses to sign without one, and is
+        meaningless for EC.
+
+        Attestation runs as the session's UID, and keystore2 puts that UID's
+        package name and signing certificate into the extension itself. A
+        session for a UID with no installed package -- root, or an unused app
+        id -- fails here rather than attesting to nothing.
+        """
+        parameters = generation_parameters(
+            algorithm,
+            purposes,
+            key_size=key_size,
+            ec_curve=ec_curve,
+            digests=digests,
+            paddings=paddings,
+            attestation_challenge=attestation_challenge,
+            device_ids=device_ids,
+            include_unique_id=include_unique_id,
+            no_auth_required=no_auth_required,
+            extra=extra,
+            **kwargs,
+        )
+        return self.generate_key(
+            key,
+            parameters,
+            attestation_key=attestation_key,
+            security_level=security_level,
+        )
 
     # -- operations ---------------------------------------------------------
 

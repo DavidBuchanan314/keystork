@@ -209,6 +209,22 @@ class BinderException(IntEnum):
     EX_TRANSACTION_FAILED = -129
 
 
+class VerifiedBootState(IntEnum):
+    """The boot state inside a key attestation's RootOfTrust.
+
+    Not a KeyMint AIDL enum -- it exists only in the attestation extension's
+    ASN.1 -- but it is a wire integer that wants a name like any other.
+    VERIFIED means the boot chain was signed by the OEM's own key;
+    SELF_SIGNED means it verified against a user-installed key, which is what
+    an unlocked bootloader running a custom build looks like.
+    """
+
+    VERIFIED = 0
+    SELF_SIGNED = 1
+    UNVERIFIED = 2
+    FAILED = 3
+
+
 class IntegrityErrorCode(IntEnum):
     """The Play Integrity SDK's own IntegrityErrorCode.
 

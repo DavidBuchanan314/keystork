@@ -20,6 +20,15 @@ call as the session's UID and hands the raw bytes back. Everything that is
 interpretation -- naming enum values, pagination, typed errors -- lives here.
 """
 
+from . import attestation
+from .attestation import (
+    ATTESTATION_OID,
+    Attestation,
+    AttestationApplicationId,
+    AttestationError,
+    PackageInfo,
+    RootOfTrust,
+)
 from .connection import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -50,6 +59,7 @@ from .enums import (
     SecurityLevel,
     Tag,
     TagType,
+    VerifiedBootState,
     name_of,
     type_of_tag,
 )
@@ -68,8 +78,10 @@ from .errors import (
 )
 from .integrity import INTEGRITY_TIMEOUT, IntegritySession
 from .keystore import (
+    DEFAULT_KEY_SIZES,
     MIN_INTERFACE_VERSION,
     NONCE_LENGTHS,
+    RSA_PUBLIC_EXPONENT,
     Authorization,
     KeyDescriptor,
     KeyMetadata,
@@ -79,6 +91,7 @@ from .keystore import (
     Operation,
     OperationBegun,
     OperationResult,
+    generation_parameters,
     nonce_length,
     operation_parameters,
 )
@@ -110,7 +123,11 @@ from .util.packages import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "ATTESTATION_OID",
     "Algorithm",
+    "Attestation",
+    "AttestationApplicationId",
+    "AttestationError",
     "Authorization",
     "BinderException",
     "BinderStatus",
@@ -120,6 +137,7 @@ __all__ = [
     "Connection",
     "ConnectionClosed",
     "DEFAULT_HOST",
+    "DEFAULT_KEY_SIZES",
     "DEFAULT_PORT",
     "DEFAULT_TIMEOUT",
     "DEFAULT_WINDOW",
@@ -155,12 +173,15 @@ __all__ = [
     "OperationResult",
     "PACKAGES_LIST",
     "PACKAGES_XML",
+    "PackageInfo",
     "PROTOCOL_VERSION",
     "PaddingMode",
     "Process",
     "ProtocolError",
     "READ_CHUNK_BYTES",
+    "RSA_PUBLIC_EXPONENT",
     "ResponseCode",
+    "RootOfTrust",
     "STDERR",
     "STDOUT",
     "SecurityLevel",
@@ -171,7 +192,10 @@ __all__ = [
     "TransactionError",
     "USER_OFFSET",
     "UnsupportedByDevice",
+    "VerifiedBootState",
+    "attestation",
     "cert_hash",
+    "generation_parameters",
     "local_window",
     "name_of",
     "nonce_length",

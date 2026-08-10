@@ -20,6 +20,7 @@ import sys
 from typing import List, Optional, Sequence
 
 from . import errors
+from .attestation import AttestationError
 from .connection import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -33,10 +34,13 @@ from .enums import (
     BlockMode,
     Digest,
     Domain,
+    EcCurve,
+    KeyOrigin,
     KeyPurpose,
     PaddingMode,
     SecurityLevel,
     Tag,
+    VerifiedBootState,
     name_of,
 )
 from .keystore import KeyDescriptor, KeyMetadata, KeystoreSession, nonce_length
@@ -76,6 +80,16 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_key_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("alias", help="key alias, in the session UID's own namespace")
+
+
+def _add_certificate_args(parser: argparse.ArgumentParser) -> None:
+    """Where to put a key's certificates. Shared by `info` and `generate`."""
+    parser.add_argument(
+        "--cert-out", metavar="FILE", help="write the leaf certificate (DER) to FILE"
+    )
+    parser.add_argument(
+        "--chain-out", metavar="FILE", help="write the whole certificate chain (PEM) to FILE"
+    )
 
 
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
@@ -240,13 +254,106 @@ def _build_parser() -> argparse.ArgumentParser:
 
     info = operations.add_parser("info", help="show how a key was generated")
     _add_key_arg(info)
-    info.add_argument(
+    detail = info.add_mutually_exclusive_group()
+    detail.add_argument(
         "--authorizations",
         action="store_true",
         help="list every authorization rather than the summary",
     )
-    info.add_argument("--cert-out", metavar="FILE", help="write the leaf certificate (DER) to FILE")
-    info.add_argument("--chain-out", metavar="FILE", help="write the certificate chain to FILE")
+    detail.add_argument(
+        "--attestation",
+        action="store_true",
+        help="show the leaf certificate's attestation extension: the challenge, the device's "
+        "boot state, the package that asked for the key, and which authorizations the secure "
+        "hardware enforces. Parsed only -- verifying the chain is a separate job",
+    )
+    _add_certificate_args(info)
+
+    generating = operations.add_parser(
+        "generate",
+        help="generate an asymmetric key, optionally attested",
+        description="Generates a key pair in the device's secure hardware, under the session "
+        "UID's own namespace. With --attest or --challenge the certificate chain that comes "
+        "back is an attestation: the leaf carries the challenge, the key's authorizations and "
+        "the device's verified-boot state, and the chain runs up to a root the manufacturer "
+        "provisioned. keystore2 puts the session UID's package and signing certificate into "
+        "the leaf itself, so attesting needs a UID that has one.",
+    )
+    _add_key_arg(generating)
+    generating.add_argument(
+        "--algorithm", default="EC", choices=["EC", "RSA"], help="default: EC"
+    )
+    generating.add_argument(
+        "--purpose",
+        dest="purposes",
+        action="append",
+        choices=[p.name for p in KeyPurpose],
+        help="repeatable; default: SIGN and VERIFY",
+    )
+    generating.add_argument(
+        "--key-size", type=int, help="bits; RSA only, default 2048. EC takes its size from --curve"
+    )
+    generating.add_argument(
+        "--curve", choices=[c.name for c in EcCurve], help="EC only; default: P_256"
+    )
+    generating.add_argument(
+        "--digest",
+        dest="digests",
+        action="append",
+        choices=[d.name for d in Digest],
+        help="repeatable; default: SHA_2_256",
+    )
+    generating.add_argument(
+        "--padding",
+        dest="paddings",
+        action="append",
+        choices=[p.name for p in PaddingMode],
+        help="repeatable; RSA needs at least one to sign or encrypt",
+    )
+    generating.add_argument(
+        "--security-level",
+        default="TRUSTED_ENVIRONMENT",
+        choices=[s.name for s in SecurityLevel],
+        help="which backend generates the key (default: TRUSTED_ENVIRONMENT)",
+    )
+    attesting = generating.add_mutually_exclusive_group()
+    attesting.add_argument(
+        "--attest", action="store_true", help="attest, with 32 random bytes as the challenge"
+    )
+    attesting.add_argument(
+        "--challenge", metavar="HEX", help="attest, with this hex string as the challenge"
+    )
+    generating.add_argument(
+        "--attest-key",
+        metavar="ALIAS",
+        help="sign the attestation with this key of your own, which must have been generated "
+        "with --purpose ATTEST_KEY, instead of the factory batch key",
+    )
+    generating.add_argument(
+        "--include-unique-id",
+        action="store_true",
+        help="ask for the device's rotating unique id in the attestation (privileged)",
+    )
+    generating.add_argument(
+        "--attestation",
+        action="store_true",
+        help="show the parsed attestation extension instead of the key summary",
+    )
+    generating.add_argument(
+        "--auth-required",
+        action="store_true",
+        help="omit NO_AUTH_REQUIRED, making an auth-bound key. keystork cannot use one: "
+        "satisfying the challenge needs IKeystoreAuthorization, which the daemon does not speak",
+    )
+    _add_certificate_args(generating)
+
+    deleting = operations.add_parser(
+        "delete",
+        help="delete a key",
+        description="keystore2 has KeyMint delete the key material as well as the entry, so "
+        "the private key is gone rather than merely unreachable. There is no undo.",
+    )
+    _add_key_arg(deleting)
 
     signing = operations.add_parser("sign", help="sign input with a key")
     _add_key_arg(signing)
@@ -498,39 +605,84 @@ def _print_listing(entries: List[KeyDescriptor], long: bool) -> None:
         print(str(entry) if long else (entry.alias if entry.alias is not None else str(entry)))
 
 
+def _print_key_summary(metadata: KeyMetadata) -> None:
+    def names(table, values):
+        return ", ".join(name_of(table, v) for v in values) or "-"
+
+    algorithm = name_of(Algorithm, metadata.algorithm) if metadata.algorithm is not None else "-"
+    certificates = metadata.certificates
+    print(f"key          {metadata.key}")
+    print(f"algorithm    {algorithm}")
+    print(f"key size     {metadata.key_size or '-'}")
+    print(f"level        {name_of(SecurityLevel, metadata.security_level)}")
+    origin = name_of(KeyOrigin, metadata.origin) if metadata.origin is not None else "-"
+    print(f"origin       {origin}")
+    print(f"purposes     {names(KeyPurpose, metadata.purposes)}")
+    print(f"digests      {names(Digest, metadata.digests)}")
+    print(f"paddings     {names(PaddingMode, metadata.paddings)}")
+    print(f"block modes  {names(BlockMode, metadata.block_modes)}")
+    print(f"min mac len  {metadata.min_mac_length if metadata.min_mac_length else '-'}")
+    print(f"caller nonce {metadata.caller_nonce}")
+    print(f"auth bound   {metadata.auth_required}")
+    print(f"attested     {metadata.attested}")
+    print(f"certificates {len(certificates)} ({sum(len(c) for c in certificates)} bytes)")
+
+
+def _print_attestation(metadata: KeyMetadata) -> None:
+    """The leaf's attestation extension, parsed. Nothing here is verified."""
+    try:
+        parsed = metadata.attestation
+    except AttestationError as exc:
+        print(f"attestation  could not be parsed: {exc}")
+        return
+    if parsed is None:
+        print("attestation  none (the key was generated without a challenge)")
+        return
+
+    root = parsed.root_of_trust
+    application = parsed.application_id
+    print(f"version      {parsed.attestation_version}")
+    print(f"level        {name_of(SecurityLevel, parsed.keymint_security_level)}")
+    print(f"challenge    {parsed.challenge.hex()}")
+    print(f"os           {parsed.os_version} patch {parsed.os_patch_level}")
+    print(f"boot patch   {parsed.boot_patch_level} vendor {parsed.vendor_patch_level}")
+    if root is not None:
+        print(f"boot state   {name_of(VerifiedBootState, root.verified_boot_state)}")
+        print(f"bootloader   {'locked' if root.device_locked else 'unlocked'}")
+    if application is not None:
+        for package in application.packages:
+            print(f"package      {package.name} version {package.version}")
+        for digest in application.signature_digests:
+            print(f"signer       SHA-256 {digest.hex()}")
+    print("hardware enforced:")
+    for parameter in parsed.hardware_enforced:
+        print(f"  {parameter}")
+    print("software enforced:")
+    for parameter in parsed.software_enforced:
+        print(f"  {parameter}")
+
+
+def _write_certificates(metadata: KeyMetadata, args: argparse.Namespace) -> None:
+    """Honour --cert-out and --chain-out, which both commands that see a key have.
+
+    The leaf goes out as the DER keystore2 gave us; the chain goes out as PEM,
+    because it is a chain and everything that consumes one wants it that way.
+    """
+    if args.cert_out and metadata.certificate:
+        _write_output(metadata.certificate, args.cert_out, False)
+    if args.chain_out and metadata.certificates:
+        _write_output(metadata.pem_chain().encode(), args.chain_out, False)
+
+
 def _print_info(metadata: KeyMetadata, args: argparse.Namespace) -> None:
     if args.authorizations:
         for authorization in metadata.authorizations:
             print(authorization)
+    elif args.attestation:
+        _print_attestation(metadata)
     else:
-
-        def names(table, values):
-            return ", ".join(name_of(table, v) for v in values) or "-"
-
-        algorithm = (
-            name_of(Algorithm, metadata.algorithm) if metadata.algorithm is not None else "-"
-        )
-        print(f"key          {metadata.key}")
-        print(f"algorithm    {algorithm}")
-        print(f"key size     {metadata.key_size or '-'}")
-        print(f"level        {name_of(SecurityLevel, metadata.security_level)}")
-        print(f"purposes     {names(KeyPurpose, metadata.purposes)}")
-        print(f"digests      {names(Digest, metadata.digests)}")
-        print(f"paddings     {names(PaddingMode, metadata.paddings)}")
-        print(f"block modes  {names(BlockMode, metadata.block_modes)}")
-        print(f"min mac len  {metadata.min_mac_length if metadata.min_mac_length else '-'}")
-        print(f"caller nonce {metadata.caller_nonce}")
-        print(f"auth bound   {metadata.auth_required}")
-        print(f"certificate  {len(metadata.certificate) if metadata.certificate else 0} bytes")
-        print(
-            f"chain        {len(metadata.certificate_chain) if metadata.certificate_chain else 0}"
-            " bytes"
-        )
-
-    if args.cert_out and metadata.certificate:
-        _write_output(metadata.certificate, args.cert_out, False)
-    if args.chain_out and metadata.certificate_chain:
-        _write_output(metadata.certificate_chain, args.chain_out, False)
+        _print_key_summary(metadata)
+    _write_certificates(metadata, args)
 
 
 def _nonce_length_for(session: KeystoreSession, args: argparse.Namespace) -> int:
@@ -561,6 +713,50 @@ def _run(session: KeystoreSession, args: argparse.Namespace) -> int:
 
     if args.operation == "info":
         _print_info(session.get_key_entry(args.alias), args)
+        return 0
+
+    if args.operation == "generate":
+        challenge = None
+        if args.attest:
+            challenge = os.urandom(32)
+        elif args.challenge is not None:
+            try:
+                challenge = binascii.unhexlify(args.challenge.strip())
+            except binascii.Error as exc:
+                raise errors.KeystorkError(f"--challenge is not hex: {exc}") from exc
+
+        algorithm = Algorithm[args.algorithm]
+        curve = _enum_value(EcCurve, args.curve)
+        if algorithm == Algorithm.EC and curve is None and args.key_size is None:
+            curve = EcCurve.P_256
+
+        metadata = session.generate_key_pair(
+            args.alias,
+            algorithm=algorithm,
+            purposes=[KeyPurpose[p] for p in (args.purposes or ["SIGN", "VERIFY"])],
+            key_size=args.key_size,
+            ec_curve=curve,
+            digests=[Digest[d] for d in (args.digests or ["SHA_2_256"])],
+            paddings=[PaddingMode[p] for p in (args.paddings or [])],
+            attestation_challenge=challenge,
+            include_unique_id=args.include_unique_id,
+            no_auth_required=not args.auth_required,
+            attestation_key=args.attest_key,
+            security_level=SecurityLevel[args.security_level],
+        )
+        if args.verbose and challenge is not None:
+            print(f"challenge {challenge.hex()}", file=sys.stderr)
+        if args.attestation:
+            _print_attestation(metadata)
+        else:
+            _print_key_summary(metadata)
+        _write_certificates(metadata, args)
+        return 0
+
+    if args.operation == "delete":
+        session.delete_key(args.alias)
+        if args.verbose:
+            print(f"deleted {args.alias}", file=sys.stderr)
         return 0
 
     if args.operation == "sign":

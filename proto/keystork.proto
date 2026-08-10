@@ -586,6 +586,72 @@ message GetKeyEntryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Key generation and attestation
+//
+// generateKey lives on IKeystoreSecurityLevel, so this carries the level to
+// ask getSecurityLevel for, exactly as OperationStart does.
+//
+// Attestation is not a separate call: a generation whose parameters include
+// ATTESTATION_CHALLENGE comes back with a certificate chain rooted in a key
+// the manufacturer provisioned, and the leaf carries an extension describing
+// the key and the device. Without a challenge an asymmetric key still gets a
+// self-signed leaf, and no chain.
+//
+// keystore2 fills in ATTESTATION_APPLICATION_ID itself, from the calling UID's
+// package and signing certificate -- a caller cannot set it, which is what
+// binds an attestation to an app. A session opened for a UID with no package
+// (root, say) has nothing to fill it from, and keystore2 refuses the
+// generation rather than attesting to nothing.
+// ---------------------------------------------------------------------------
+
+message GenerateKeyRequest {
+  // Where the new key goes. Domain APP with an alias is the ordinary case.
+  KeyDescriptor key = 1;
+
+  // Sign the attestation with this key instead of the factory-provisioned
+  // batch key. Absent for the ordinary case. The key named here must itself
+  // have been generated with ATTEST_KEY in its purposes.
+  optional KeyDescriptor attestation_key = 2;
+
+  // KeyMint generation parameters: ALGORITHM, KEY_SIZE, PURPOSE (repeatable),
+  // DIGEST, EC_CURVE, ATTESTATION_CHALLENGE, and the rest. Passed through as
+  // sent -- what a key requires is KeyMint's business, not this daemon's.
+  repeated KeyParameter parameters = 3;
+
+  // IKeystoreSecurityLevel flags. Only bit 0 is defined today
+  // (KEY_FLAG_AUTH_BOUND_WITHOUT_CRYPTOGRAPHIC_LSKF_BINDING).
+  int32 flags = 4;
+
+  // Extra entropy to mix into KeyMint's own RNG. Never a substitute for it:
+  // KeyMint stirs this in rather than trusting it. Empty is normal.
+  bytes entropy = 5;
+
+  // Which backend to generate in: SOFTWARE=0, TRUSTED_ENVIRONMENT=1,
+  // STRONGBOX=2, KEYSTORE=100. Attestation needs a hardware level to mean
+  // anything.
+  int32 security_level = 6;
+}
+
+message GenerateKeyResponse {
+  // The generated key's metadata, including the leaf certificate and, when a
+  // challenge was given, the attestation chain behind it.
+  KeyMetadata metadata = 1;
+}
+
+// Deletes a key. On IKeystoreService rather than a security level, since a key
+// is found by descriptor and keystore2 knows which backend holds it.
+//
+// The key material goes with the entry: keystore2 asks KeyMint to delete the
+// blob, so this is not a database row being unlinked. There is no undo and no
+// confirmation, and deleting a key that is not there is an error rather than a
+// no-op -- keystore2 answers KEY_NOT_FOUND.
+message DeleteKeyRequest {
+  KeyDescriptor key = 1;
+}
+
+message DeleteKeyResponse {}
+
+// ---------------------------------------------------------------------------
 // Operations (encrypt / decrypt / sign / verify)
 //
 // keystore2's createOperation hands back a live Binder handle to an operation
@@ -710,6 +776,8 @@ message KeystoreRequest {
   oneof body {
     ListRequest list = 1;
     GetKeyEntryRequest get_key_entry = 8;
+    GenerateKeyRequest generate_key = 10;
+    DeleteKeyRequest delete_key = 12;
     RunOperationRequest run_operation = 2;
     OpBeginRequest op_begin = 3;
     OpUpdateAadRequest op_update_aad = 4;
@@ -736,6 +804,8 @@ message KeystoreResponse {
     Error error = 1;
     ListResponse list = 2;
     GetKeyEntryResponse get_key_entry = 9;
+    GenerateKeyResponse generate_key = 11;
+    DeleteKeyResponse delete_key = 13;
     RunOperationResponse run_operation = 3;
     OpBeginResponse op_begin = 4;
     OpUpdateAadResponse op_update_aad = 5;
