@@ -29,6 +29,7 @@ from .enums import (
     BlockMode,
     Digest,
     Domain,
+    EcCurve,
     ErrorCode,
     KeyPurpose,
     PaddingMode,
@@ -498,13 +499,17 @@ def operation_parameters(
 
 
 # Key size in bits when an algorithm needs one and the caller did not say. EC
-# takes its size from the curve instead, so it is absent here.
+# is absent on purpose: it takes its size from the curve, and KEY_SIZE is
+# deprecated for EC keys -- DEFAULT_EC_CURVE is its counterpart.
 DEFAULT_KEY_SIZES = {
     Algorithm.RSA: 2048,
     Algorithm.AES: 256,
     Algorithm.HMAC: 256,
     Algorithm.TRIPLE_DES: 168,
 }
+
+# The curve an EC key gets when the caller names neither a curve nor a size.
+DEFAULT_EC_CURVE = EcCurve.P_256
 
 # RSA's public exponent. 65537 is the only value KeyMint accepts.
 RSA_PUBLIC_EXPONENT = 65537
@@ -558,7 +563,13 @@ def generation_parameters(
     parameters.extend(KeyParameter(Tag.PURPOSE, int(p)) for p in purposes)
 
     if key_size is None and ec_curve is None:
-        key_size = DEFAULT_KEY_SIZES.get(algorithm)
+        if algorithm == Algorithm.EC:
+            # An EC key is sized by its curve, so leaving both unset has to
+            # produce a curve. Falling through to DEFAULT_KEY_SIZES here would
+            # emit neither, and KeyMint answers UNSUPPORTED_KEY_SIZE.
+            ec_curve = DEFAULT_EC_CURVE
+        else:
+            key_size = DEFAULT_KEY_SIZES.get(algorithm)
     if key_size is not None:
         parameters.append(KeyParameter(Tag.KEY_SIZE, int(key_size)))
     if ec_curve is not None:
@@ -903,10 +914,12 @@ class KeystoreSession:
         Without one the key still gets a self-signed leaf and no chain, which
         proves nothing about where the key lives.
 
-        An EC key takes its size from `ec_curve` and ignores `key_size`; RSA
-        defaults to 2048 bits with the only public exponent KeyMint allows.
-        `paddings` matters for RSA, which refuses to sign without one, and is
-        meaningless for EC.
+        An EC key is sized by its curve: naming neither gets `DEFAULT_EC_CURVE`,
+        and KEY_SIZE is deprecated for EC, so pass `ec_curve` rather than
+        `key_size` unless you specifically want the legacy form. RSA defaults to
+        2048 bits with the only public exponent KeyMint allows. `paddings`
+        matters for RSA, which refuses to sign without one, and is meaningless
+        for EC.
 
         Attestation runs as the session's UID, and keystore2 puts that UID's
         package name and signing certificate into the extension itself. A

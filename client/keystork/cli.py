@@ -43,7 +43,13 @@ from .enums import (
     VerifiedBootState,
     name_of,
 )
-from .keystore import KeyDescriptor, KeyMetadata, KeystoreSession, nonce_length
+from .keystore import (
+    DEFAULT_EC_CURVE,
+    KeyDescriptor,
+    KeyMetadata,
+    KeystoreSession,
+    nonce_length,
+)
 from .process import ESCAPE, local_window, stdin_is_tty
 from .util import appcheck
 from .util.packages import (
@@ -294,7 +300,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--key-size", type=int, help="bits; RSA only, default 2048. EC takes its size from --curve"
     )
     generating.add_argument(
-        "--curve", choices=[c.name for c in EcCurve], help="EC only; default: P_256"
+        "--curve",
+        choices=[c.name for c in EcCurve],
+        help=f"EC only; default: {DEFAULT_EC_CURVE.name}",
     )
     generating.add_argument(
         "--digest",
@@ -725,17 +733,12 @@ def _run(session: KeystoreSession, args: argparse.Namespace) -> int:
             except binascii.Error as exc:
                 raise errors.KeystorkError(f"--challenge is not hex: {exc}") from exc
 
-        algorithm = Algorithm[args.algorithm]
-        curve = _enum_value(EcCurve, args.curve)
-        if algorithm == Algorithm.EC and curve is None and args.key_size is None:
-            curve = EcCurve.P_256
-
         metadata = session.generate_key_pair(
             args.alias,
-            algorithm=algorithm,
+            algorithm=Algorithm[args.algorithm],
             purposes=[KeyPurpose[p] for p in (args.purposes or ["SIGN", "VERIFY"])],
             key_size=args.key_size,
-            ec_curve=curve,
+            ec_curve=_enum_value(EcCurve, args.curve),
             digests=[Digest[d] for d in (args.digests or ["SHA_2_256"])],
             paddings=[PaddingMode[p] for p in (args.paddings or [])],
             attestation_challenge=challenge,
