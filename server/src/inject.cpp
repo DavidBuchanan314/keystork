@@ -431,23 +431,20 @@ Landmark SyscallArgumentIs(long number, int index, uint64_t value) {
   };
 }
 
-// The main looper polling. MessageQueue.next() calls nativePollOnce before it
-// dequeues anything, so a stop at the exit of one of these is a moment when a
-// message that has arrived is on the queue and has not been dispatched --
-// which is the whole window stage three needs.
+// ioctl(_, BINDER_WRITE_READ) -- _IOWR('b', 1, struct binder_write_read), six
+// 64-bit fields. Every binder transaction the main thread makes is one of
+// these, which is what makes it a usable place to keep asking whether
+// ActivityThread.attach has run yet: attach's own attachApplication call is a
+// synchronous transaction, so at worst we stop at that one.
 //
-// bionic's epoll_wait is epoll_pwait on aarch64; epoll_pwait2 is matched too
-// so that a libc which switches does not silently stop matching.
-Landmark IsLooperPoll() {
-  return [](Tracee&, const user_regs_struct& registers) {
-    const long number = static_cast<long>(registers.regs[8]);
-    return number == SYS_epoll_pwait
-#ifdef SYS_epoll_pwait2
-           || number == SYS_epoll_pwait2
-#endif
-        ;
-  };
-}
+// It replaces a landmark on the looper's poll, which cannot be relied on.
+// Looper::pollInner skips epoll_wait entirely for a zero timeout with no fd
+// requests (libutils/Looper.cpp), and a zero timeout is precisely the first
+// MessageQueue.next() iteration -- the one that dispatches a bind that has
+// already arrived. In that case the poll issues no syscall at all and there is
+// nothing to stop at. An ioctl cannot be skipped that way: it is how the call
+// is made, not an optimisation around it.
+constexpr uint64_t kBinderWriteRead = 0xc0306201;
 
 // Runs the target forward until it is stopped at the *exit* of the first
 // syscall the landmark claims -- an exit stop being somewhere safe to borrow
@@ -492,6 +489,7 @@ bool StepToSyscallExit(pid_t pid, const Landmark& landmark, int64_t deadline, in
       pending = (signal == SIGTRAP || signal == SIGSTOP) ? 0 : signal;
       continue;
     }
+
     if (claiming) return true;
 
     if (at_entry) {
@@ -563,11 +561,10 @@ bool CallAgent(pid_t pid, uint64_t function, const char* symbol, uint64_t first,
   return tracee.ok() ? true : (*error = tracee.error(), false);
 }
 
-// How many times to let the main looper poll before giving up on the bind
-// arriving. The system server sends it during attachApplication, so in
-// practice it is there at the first or second poll; this only bounds a wrong
-// guess about that.
-constexpr int kMaxLooperPolls = 64;
+// How many binder calls to let the main thread make before giving up on
+// ActivityThread.attach happening at all. Everything before Looper.loop() is a
+// handful of transactions, so this only bounds a wrong guess about that.
+constexpr int kMaxBinderCalls = 64;
 
 // A connected socket to the target, with no name anywhere.
 //
@@ -629,14 +626,29 @@ bool OpenChannel(pid_t pid, uint64_t scratch, int* ours, int* theirs, std::strin
   return tracee.ok() ? true : (*error = tracee.error(), false);
 }
 
-// Stage three: stop the main thread each time it polls, and ask the agent
-// whether the app's bind data has arrived yet. The agent does the surgery the
-// moment it can see it -- with the process stopped, before the message has
-// been dispatched, so nothing about it is a race.
-bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class, int64_t deadline,
-                   int* channel, uint32_t* steps_taken, int* agent_result, std::string* error) {
+// Stage three: stop the main thread at each binder call and ask the agent
+// whether ActivityThread.attach has run yet. Once it has, the agent installs a
+// Handler.Callback on the main handler and we are done -- the surgery itself
+// happens later, when the framework dispatches the bind.
+//
+// This used to stop at the looper's poll and rewrite the bind data in place,
+// which failed intermittently for a reason worth recording: Looper::pollInner
+// skips epoll_wait entirely when the timeout is zero and no fds are registered,
+// and a zero timeout is exactly the first MessageQueue.next() iteration -- the
+// one that runs when the bind is already waiting. No syscall, so no stop, so
+// the main thread walked into handleBindApplication with us still stepping
+// towards a landmark that would never come. Stopping somewhere and hooking the
+// dispatch removes the timing from it: whenever the bind arrives, early or
+// late, it goes through a Java call we are already sitting in front of.
+//
+// The window we do still need is a stop between attach() assigning
+// sCurrentActivityThread and the first dispatch, and attach()'s own
+// attachApplication transaction sits inside it.
+bool InstallBindHook(pid_t pid, uint64_t handle, const std::string& activity_class,
+                     int64_t deadline, int* channel, uint32_t* steps_taken, int* agent_result,
+                     std::string* error) {
   uint64_t entry = 0;
-  if (!RemoteSymbol(pid, handle, "keystork_bind", &entry, error)) return false;
+  if (!RemoteSymbol(pid, handle, "keystork_hook", &entry, error)) return false;
 
   // The class name has to be readable in the target at each call, and the
   // calls happen wherever the stepping stopped -- so it is mapped once, here,
@@ -661,33 +673,40 @@ bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class
     }
   }
 
-  // The channel is opened before the surgery rather than after it: the agent
-  // is told the descriptor number as it installs itself, so the number is
-  // already there by the time the app's Application asks for it -- which
-  // happens after we have detached and can no longer reach into the process.
-  // A page's worth of scratch is plenty for both the name and the two ints,
-  // which go far enough past it not to overlap.
+  // The channel is opened before the hook rather than after it: the agent is
+  // told the descriptor number as it installs itself, so the number is already
+  // there by the time the app's Application asks for it -- which happens after
+  // we have detached and can no longer reach into the process. A page's worth
+  // of scratch is plenty for both the name and the two ints, which go far
+  // enough past it not to overlap.
   int theirs = -1;
   if (!OpenChannel(pid, scratch + page / 2, channel, &theirs, error)) return false;
 
   int total = 0;
-  for (int poll = 1; poll <= kMaxLooperPolls; poll++) {
+  for (int call = 1; call <= kMaxBinderCalls; call++) {
     int steps = 0;
-    if (!StepToSyscallExit(pid, IsLooperPoll(), deadline, &steps, error)) return false;
+    if (!StepToSyscallExit(pid, SyscallArgumentIs(SYS_ioctl, 1, kBinderWriteRead), deadline, &steps,
+                           error)) {
+      return false;
+    }
     total += steps;
 
     int said = 0;
-    if (!CallAgent(pid, entry, "keystork_bind", scratch, static_cast<uint64_t>(theirs), &said,
+    if (!CallAgent(pid, entry, "keystork_hook", scratch, static_cast<uint64_t>(theirs), &said,
                    error)) {
       return false;
     }
     if (said < 0) {
-      *error = "keystork_bind failed (" + std::to_string(said) + "); see logcat";
+      // Every one of these ends the session rather than opening one that cannot
+      // answer, which is the whole of what this has to get right. Which failure
+      // it was is the agent's to explain, and it does, in logcat.
+      *error = "keystork_hook failed (" + std::to_string(said) + ") at binder call " +
+               std::to_string(call) + ", " + std::to_string(total) +
+               " syscalls past the arm; see logcat";
       return false;
     }
     if (said > 0) {
-      KS_LOGI("took the app's own code off the classpath at poll %d, %d syscalls past the arm",
-              poll, total);
+      KS_LOGI("hooked the bind dispatch at binder call %d, %d syscalls past the arm", call, total);
       // Nothing of ours should be left mapped in a process that carries on
       // living; the agent has copied the name into a Java String by now.
       Tracee tracee(pid);
@@ -699,8 +718,8 @@ bool InterceptBind(pid_t pid, uint64_t handle, const std::string& activity_class
       return true;
     }
   }
-  *error = "the app's bind data never reached the main thread in " +
-           std::to_string(kMaxLooperPolls) + " polls";
+  *error = "the app's main thread never reached ActivityThread.attach in " +
+           std::to_string(kMaxBinderCalls) + " binder calls";
   return false;
 }
 
@@ -1046,7 +1065,7 @@ bool OpenIntegritySession(const pb::OpenIntegritySessionRequest& request,
         opened = false;
       } else {
         int bound = 0;
-        opened = InterceptBind(target, handle, activity_class, deadline, &channel, &bind_steps,
+        opened = InstallBindHook(target, handle, activity_class, deadline, &channel, &bind_steps,
                                &bound, &error);
       }
     }

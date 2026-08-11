@@ -14,10 +14,13 @@
 //   keystork_arm, called by the injector once the runtime has settled.
 //   Everything that needs a working VM belongs here.
 //
-//   keystork_bind, called repeatedly while the main thread runs up to
-//   ActivityThread.handleBindApplication. It answers "not yet" until the app's
-//   bind data is reachable, and then takes the app's own code off every
-//   classpath in the process.
+//   keystork_hook, called repeatedly while the main thread runs up to
+//   Looper.loop(). It answers "not yet" until ActivityThread.attach has run,
+//   then installs keystork.BindHook on the main handler -- or refuses, if the
+//   bind was dispatched before we got there.
+//
+// The surgery those lead up to does not run from any of them. It runs from the
+// hook, on the app's own thread, after the daemon has detached.
 //
 // None of them runs on a thread of its own. The injector calls each with the
 // process stopped under ptrace and waits for it to return, so nothing here
@@ -321,9 +324,15 @@ EXPORT int keystork_arm(void) {
 // PathClassLoader over the app's dex, and instantiates the app's Application
 // class, its AppComponentFactory and its content providers -- by name, off
 // that LoadedApk. All of it is driven by the AppBindData the system server
-// sent, and none of it has happened while the message is still on the queue.
+// sent, and none of it has happened when the message reaches the handler.
 //
-// So this runs there, and does two things:
+// So this runs from a Handler.Callback on ActivityThread.mH, which the
+// framework consults before handleBindApplication and which therefore cannot
+// be stepped over -- unlike the looper poll the daemon used to stop at, which
+// is not always a syscall and so not always somewhere it can stop at all. See
+// BindHook.java for that.
+//
+// It does two things:
 //
 //   answers the names. The Application class becomes ours; the component the
 //   process was started for is answered by Loader's substitution map; the
@@ -455,94 +464,16 @@ static void SetStringField(JNIEnv* env, jobject object, jclass type, const char*
   (*env)->SetObjectField(env, object, id, value == NULL ? NULL : (*env)->NewStringUTF(env, value));
 }
 
-// The bind data, if the main thread has got that far. Two ways of asking,
-// because they cover different halves of the window:
+// The surgery itself, run from keystork.BindHook as the message is dispatched
+// -- so on the app's own main thread, with the daemon long since detached, and
+// with the AppBindData handed to us rather than hunted for.
 //
-//   ActivityThread.mBoundApplication is set at the top of
-//   handleBindApplication, so it answers once the dispatch has begun.
-//
-//   the message itself, still on the main looper's queue, answers before the
-//   dispatch -- which is where we normally are, since MessageQueue.next()
-//   polls before it dequeues.
-//
-// Either way the process is stopped, so what is found cannot move underneath
-// us.
-static jobject FindBindData(JNIEnv* env) {
-  jclass activity_thread = (*env)->FindClass(env, "android/app/ActivityThread");
-  if (Threw(env, "FindClass(ActivityThread)") || activity_thread == NULL) return NULL;
-
-  jmethodID current = (*env)->GetStaticMethodID(env, activity_thread, "currentActivityThread",
-                                                "()Landroid/app/ActivityThread;");
-  if (Threw(env, "currentActivityThread id") || current == NULL) return NULL;
-  jobject thread = (*env)->CallStaticObjectMethod(env, activity_thread, current);
-  if (Threw(env, "currentActivityThread") || thread == NULL) return NULL;
-
-  jobject bound = GetObjectFieldNamed(env, thread, activity_thread, "mBoundApplication",
-                                      "Landroid/app/ActivityThread$AppBindData;");
-  if (bound != NULL) {
-    LOG("  handleBindApplication has already begun");
-    return bound;
-  }
-
-  jclass looper = (*env)->FindClass(env, "android/os/Looper");
-  if (Threw(env, "FindClass(Looper)") || looper == NULL) return NULL;
-  jmethodID get_main =
-      (*env)->GetStaticMethodID(env, looper, "getMainLooper", "()Landroid/os/Looper;");
-  if (Threw(env, "getMainLooper id") || get_main == NULL) return NULL;
-  jobject main = (*env)->CallStaticObjectMethod(env, looper, get_main);
-  if (Threw(env, "getMainLooper") || main == NULL) return NULL;
-
-  jmethodID get_queue =
-      (*env)->GetMethodID(env, looper, "getQueue", "()Landroid/os/MessageQueue;");
-  if (Threw(env, "getQueue id") || get_queue == NULL) return NULL;
-  jobject queue = (*env)->CallObjectMethod(env, main, get_queue);
-  if (Threw(env, "getQueue") || queue == NULL) return NULL;
-
-  jclass queue_class = (*env)->GetObjectClass(env, queue);
-  jclass message = (*env)->FindClass(env, "android/os/Message");
-  jclass bind_data = (*env)->FindClass(env, "android/app/ActivityThread$AppBindData");
-  if (Threw(env, "message classes") || message == NULL || bind_data == NULL) return NULL;
-
-  jfieldID next = (*env)->GetFieldID(env, message, "next", "Landroid/os/Message;");
-  jfieldID payload = (*env)->GetFieldID(env, message, "obj", "Ljava/lang/Object;");
-  if (Threw(env, "Message fields") || next == NULL || payload == NULL) return NULL;
-
-  jobject found = NULL;
-  for (jobject queued = GetObjectFieldNamed(env, queue, queue_class, "mMessages",
-                                            "Landroid/os/Message;");
-       queued != NULL && found == NULL;
-       queued = (*env)->GetObjectField(env, queued, next)) {
-    jobject carried = (*env)->GetObjectField(env, queued, payload);
-    if (carried != NULL && (*env)->IsInstanceOf(env, carried, bind_data)) {
-      LOG("  the bind message is on the main looper, not yet dispatched");
-      found = carried;
-    }
-  }
-  return found;
-}
-
-// Called by the injector at each of a series of stopping points on the way to
-// handleBindApplication, with the class the process was started to run --
-// which the daemon knows, because it is what it asked `am` to start. Returns 1
-// once the surgery is done, 0 while the bind data is still out of reach, and
-// negative if something that should have worked did not.
-EXPORT int keystork_bind(const char* launch_component, int channel) {
-  JNIEnv* env = CurrentEnv(0);
-  if (env == NULL) return -1;
-  if (g_bootstrap == NULL) {
-    LOG("  no dex loaded; stage two did not get that far");
-    return -2;
-  }
-  g_channel = channel;
-
-  jobject data = FindBindData(env);
-  if (data == NULL) {
-    // Not an error: the usual answer until the system server has sent the
-    // bind. Any exception raised looking is ours to clear.
-    (*env)->ExceptionClear(env);
-    return 0;
-  }
-
+// Everything that could be done earlier already has been: keystork_hook built
+// the loader and bound the channel while the daemon was still attached and
+// could report a failure. What is left is the writes that have to land on this
+// particular object, in the moment between the framework taking it off the
+// queue and reading it.
+static int ApplyBindData(JNIEnv* env, jobject data) {
   jclass data_class = (*env)->GetObjectClass(env, data);
   jobject app_info =
       GetObjectFieldNamed(env, data, data_class, "appInfo", "Landroid/content/pm/ApplicationInfo;");
@@ -553,19 +484,7 @@ EXPORT int keystork_bind(const char* launch_component, int channel) {
     return -3;
   }
 
-  // The loader first: everything below is only worth writing if the classes
-  // the framework is about to ask for can actually be found.
-  jobject loader = BuildLoader(env, launch_component);
-  if (loader == NULL) return -11;
-  g_loader = (*env)->NewGlobalRef(env, loader);
-
-  // keystork.Loader carries no dex of its own and delegates to the one that
-  // does, so every class the app ends up running -- Shell included -- is
-  // defined by g_bootstrap. Registering on the Agent from there is therefore
-  // registering on the very class Shell will reach.
-  if (RegisterChannelAccess(env) != 0) return -12;
-
-  // Then the names. getCustomApplicationClassNameForProcess consults
+  // The names. getCustomApplicationClassNameForProcess consults
   // mAppClassNamesByProcess before className, so clearing it is what makes
   // className the only answer -- an app declaring a per-process Application
   // class would otherwise sail straight past ours.
@@ -617,5 +536,160 @@ EXPORT int keystork_bind(const char* launch_component, int channel) {
   }
 
   LOG("  the app's LoadedApk now answers with our class loader");
+  return 0;
+}
+
+// keystork.BindHook.apply. Failure here is past the point where the daemon can
+// be told, so it is reported the only way left that anyone will notice: the
+// channel is closed, which the daemon reads as the app hanging up and the
+// client as a closed connection. The alternative is the process the daemon
+// already refuses to produce -- one that holds a session and answers nothing.
+static void ApplyFromHook(JNIEnv* env, jclass ignored, jobject data) {
+  (void)ignored;
+  const int failed = ApplyBindData(env, data);
+  (*env)->ExceptionClear(env);
+  if (failed == 0) return;
+
+  LOG("  the bind surgery failed (%d); closing the channel so nothing waits on this process",
+      failed);
+  if (g_channel >= 0) {
+    close(g_channel);
+    g_channel = -1;
+  }
+}
+
+// Lifts hidden-API enforcement for the rest of this process's life.
+//
+// Needed because of where the surgery moved to. Every field it touches is
+// hidden, and ART decides that by walking back to the calling class: a call
+// driven by ptrace has no managed frame at all, which is treated as trusted, so
+// the agent could always reach them. Running from keystork.BindHook puts an
+// app-domain class on the stack instead, and app domain means denied --
+// silently, since a denied field read just answers null. That cost us
+// AppBindData.compatInfo and, worse, left ApplyBindData's ArrayMap of
+// per-process Application classes uncleared, which is the one thing that lets
+// an app's own class through.
+//
+// This runs from the injector's call, so it is still the trusted case, and it
+// is the last moment that is true. "L" is a prefix match against a type
+// signature and every signature begins with it, so it exempts everything.
+static int ExemptHiddenApi(JNIEnv* env) {
+  jclass vm_runtime = (*env)->FindClass(env, "dalvik/system/VMRuntime");
+  if (Threw(env, "FindClass(VMRuntime)") || vm_runtime == NULL) return -1;
+
+  jmethodID get_runtime =
+      (*env)->GetStaticMethodID(env, vm_runtime, "getRuntime", "()Ldalvik/system/VMRuntime;");
+  if (Threw(env, "getRuntime id") || get_runtime == NULL) return -1;
+  jobject runtime = (*env)->CallStaticObjectMethod(env, vm_runtime, get_runtime);
+  if (Threw(env, "getRuntime") || runtime == NULL) return -1;
+
+  jmethodID exempt =
+      (*env)->GetMethodID(env, vm_runtime, "setHiddenApiExemptions", "([Ljava/lang/String;)V");
+  if (Threw(env, "setHiddenApiExemptions id") || exempt == NULL) return -1;
+
+  jclass string = (*env)->FindClass(env, "java/lang/String");
+  if (Threw(env, "FindClass(String)") || string == NULL) return -1;
+  jobjectArray everything =
+      (*env)->NewObjectArray(env, 1, string, (*env)->NewStringUTF(env, "L"));
+  if (Threw(env, "exemption array") || everything == NULL) return -1;
+
+  (*env)->CallVoidMethod(env, runtime, exempt, everything);
+  if (Threw(env, "setHiddenApiExemptions")) return -1;
+
+  LOG("  hidden-API enforcement lifted; the hook runs as app-domain code");
+  return 0;
+}
+
+// Called by the injector at each of a series of stopping points on the way to
+// Looper.loop(), with the class the process was started to run -- which the
+// daemon knows, because it is what it asked `am` to start.
+//
+// Installs keystork.BindHook on ActivityThread.mH and does everything that can
+// be done before the bind arrives. Answers 1 once the hook is on, 0 until
+// ActivityThread.attach has run and there is an mH to put it on, and a negative
+// if something that should have worked did not -- including -13, the dispatch
+// having already happened, which is the one failure that is nobody's bug here.
+EXPORT int keystork_hook(const char* launch_component, int channel) {
+  JNIEnv* env = CurrentEnv(0);
+  if (env == NULL) return -1;
+  if (g_bootstrap == NULL) {
+    LOG("  no dex loaded; stage two did not get that far");
+    return -2;
+  }
+  g_channel = channel;
+
+  jclass activity_thread = (*env)->FindClass(env, "android/app/ActivityThread");
+  if (Threw(env, "FindClass(ActivityThread)") || activity_thread == NULL) return -3;
+
+  jmethodID current = (*env)->GetStaticMethodID(env, activity_thread, "currentActivityThread",
+                                                "()Landroid/app/ActivityThread;");
+  if (Threw(env, "currentActivityThread id") || current == NULL) return -4;
+  jobject thread = (*env)->CallStaticObjectMethod(env, activity_thread, current);
+  if (thread == NULL) {
+    // The usual answer until attach() assigns sCurrentActivityThread. Not an
+    // error, and any exception raised looking is ours to clear.
+    (*env)->ExceptionClear(env);
+    return 0;
+  }
+
+  // mH exists from ActivityThread's field initialiser, so it is there as soon
+  // as the instance is -- but mBoundApplication says whether the message it
+  // carries has already gone through, which is the one thing a hook cannot be
+  // installed in front of.
+  jobject bound = GetObjectFieldNamed(env, thread, activity_thread, "mBoundApplication",
+                                      "Landroid/app/ActivityThread$AppBindData;");
+  if (bound != NULL) {
+    LOG("  handleBindApplication has already begun; too late to hook the dispatch");
+    (*env)->ExceptionClear(env);
+    return -13;
+  }
+
+  jobject handler = GetObjectFieldNamed(env, thread, activity_thread, "mH",
+                                        "Landroid/app/ActivityThread$H;");
+  if (handler == NULL) {
+    LOG("  the ActivityThread has no mH to hook");
+    return -5;
+  }
+
+  // Before anything of ours can be called from Java, and while this call is
+  // still the trusted kind.
+  if (ExemptHiddenApi(env) != 0) return -6;
+
+  // The loader first: the hook is only worth installing if the classes the
+  // framework will ask for can actually be found.
+  jobject loader = BuildLoader(env, launch_component);
+  if (loader == NULL) return -11;
+  g_loader = (*env)->NewGlobalRef(env, loader);
+
+  // keystork.Loader carries no dex of its own and delegates to the one that
+  // does, so every class the app ends up running -- Shell included -- is
+  // defined by g_bootstrap. Registering on the Agent from there is therefore
+  // registering on the very class Shell will reach.
+  if (RegisterChannelAccess(env) != 0) return -12;
+
+  jclass hook_class = LoadClass(env, g_bootstrap, "keystork.BindHook");
+  if (hook_class == NULL) return -13;
+
+  const JNINativeMethod apply = {"apply", "(Ljava/lang/Object;)V", (void*)ApplyFromHook};
+  if ((*env)->RegisterNatives(env, hook_class, &apply, 1) != JNI_OK) {
+    Threw(env, "RegisterNatives(apply)");
+    return -14;
+  }
+
+  jmethodID ctor = (*env)->GetMethodID(env, hook_class, "<init>", "()V");
+  if (Threw(env, "BindHook ctor") || ctor == NULL) return -15;
+  jobject hook = (*env)->NewObject(env, hook_class, ctor);
+  if (Threw(env, "new BindHook") || hook == NULL) return -16;
+
+  // mCallback is Handler's, not H's, and it is final -- which stops Java
+  // assigning it, not us. Handler.dispatchMessage reads it on every message.
+  jclass handler_class = (*env)->FindClass(env, "android/os/Handler");
+  if (Threw(env, "FindClass(Handler)") || handler_class == NULL) return -17;
+  if (SetObjectFieldNamed(env, handler, handler_class, "mCallback",
+                          "Landroid/os/Handler$Callback;", hook) != 0) {
+    return -18;
+  }
+
+  LOG("  keystork.BindHook is on ActivityThread.mH; the surgery happens at dispatch");
   return 1;
 }
