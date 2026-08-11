@@ -20,17 +20,16 @@ print(nonce)
 print()
 
 print("token:")
-with device.connect() as connection:
-    # sessions are named by UID; the package list is what turns a name into one
-    uid = keystork.resolve_uid(connection, PACKAGE)
-    with connection.open_integrity_session(PACKAGE, uid) as integrity:
+with device.connect() as conn:
+    uid = keystork.resolve_uid(conn, PACKAGE)
+    with conn.open_integrity_session(PACKAGE, uid) as integrity:
         token = integrity.classic(nonce)
         print(token)
 
 print()
 
 print("verdict:")
-verdict = requests.get(VERDICT_URL, params={"token": token}, timeout=30)
+verdict = requests.get(VERDICT_URL, params={"token": token})
 verdict.raise_for_status()
 decoded = verdict.json()
 print(json.dumps(decoded, indent=4))

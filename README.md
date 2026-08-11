@@ -1,5 +1,8 @@
 # keystork
 
+> [!WARNING]
+> This tool is unfinished! It is functional but hasn't been thoroughly tested yet, and there's a lot of claudeslop still to be cleaned up. Expect breaking changes. I'm publishing it now because I got scooped by Quarkslab, who had a similar idea: https://blog.quarkslab.com/bypassing-android-hardware-attestation.html
+
 <img width="512px" alt="keystork logo" src="https://github.com/user-attachments/assets/83dbe9d5-a388-404c-8c8d-2eb77220670b" />
 
 This started off as a "keystore2-over-ip" tool (hence the name), but it's scope-crept into a more general headless-device-puppeteering swiss-army-knife,
@@ -14,7 +17,7 @@ The library also comes with a CLI tool.
 
 An incomplete list of features:
 
-- Play Integrity token minting.
+- Play Integrity token minting. (see `examples/google_play_integrity.py`)
 - Unrestricted KeyStore access (including Android Key Attestation)
 - `X-Goog-Spatula` token minting (assuming a pre-provisioned DeviceKey).
 - `X-Firebase-AppCheck` token minting.
