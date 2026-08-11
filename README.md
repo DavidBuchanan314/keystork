@@ -3,7 +3,9 @@
 > [!WARNING]
 > This tool is unfinished! It is functional but hasn't been thoroughly tested yet, and there's a lot of claudeslop still to be cleaned up. Expect breaking changes. I'm publishing it now because I got scooped by Quarkslab, who had a similar idea: https://blog.quarkslab.com/bypassing-android-hardware-attestation.html
 >
-> Comparatively, my approach has greater prerequisites (requires root LPE), but has stronger results. Expect a full writeup in human prose, eventually.
+> Comparatively, my approach has greater prerequisites (requires root LPE), but has significantly stronger results. Their approach assumes a broken backend that does not verify `attestationApplicationId`, whereas mine does not. Expect a full writeup in human prose, eventually.
+>
+> P.S. Do not trust any of the code comments, I keep Claude in the dark about certain details to avoid refusals (and it isn't allowed to read or edit this file).
 
 <img width="512px" alt="keystork logo" src="https://github.com/user-attachments/assets/83dbe9d5-a388-404c-8c8d-2eb77220670b" />
 
