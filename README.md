@@ -9,7 +9,7 @@ This started off as a "keystore2-over-ip" tool (hence the name), but it's scope-
 including reimplementing some `adb` functionality (useful when adbd isn't running as root, or isn't running at all).
 
 The tool assumes you have unrestricted root access on a device with a locked bootloader and stock AVB keys.
-This is relatively uncommon, but I'll soon be publishing tools to make it easier.
+This is relatively uncommon, but I'll soon be publishing tools to make it easier (I originally planned to release this alongside my own LPE tool, but in the meantime, you may have success with tools like https://github.com/BuSung-dev/Root-My-Galaxy or https://github.com/NebuSec/CyberMeowfia/tree/main/IonStack (I haven't tested against either since I don't have a compatible device)).
 It does still work with an unlocked bootloader, but the results of anything attestation-related will be less useful.
 
 There are two main components, the `keystorkd` service that runs on the target device, and a Python client library that runs on the host.
@@ -17,7 +17,7 @@ The library also comes with a CLI tool.
 
 An incomplete list of features:
 
-- Play Integrity token minting. (see `examples/google_play_integrity.py`)
+- Play Integrity token minting (including `MEETS_STRONG_INTEGRITY`). (see `examples/google_play_integrity.py`)
 - Unrestricted KeyStore access (including Android Key Attestation)
 - `X-Goog-Spatula` token minting (assuming a pre-provisioned DeviceKey).
 - `X-Firebase-AppCheck` token minting.
