@@ -2,6 +2,8 @@
 
 > [!WARNING]
 > This tool is unfinished! It is functional but hasn't been thoroughly tested yet, and there's a lot of claudeslop still to be cleaned up. Expect breaking changes. I'm publishing it now because I got scooped by Quarkslab, who had a similar idea: https://blog.quarkslab.com/bypassing-android-hardware-attestation.html
+>
+> Comparatively, my approach has greater prerequisites (requires root LPE), but has stronger results. Expect a full writeup in human prose, eventually.
 
 <img width="512px" alt="keystork logo" src="https://github.com/user-attachments/assets/83dbe9d5-a388-404c-8c8d-2eb77220670b" />
 
@@ -10,7 +12,7 @@ including reimplementing some `adb` functionality (useful when adbd isn't runnin
 
 The tool assumes you have unrestricted root access on a device with a locked bootloader and stock AVB keys.
 This is relatively uncommon, but I'll soon be publishing tools to make it easier (I originally planned to release this alongside my own LPE tool, but in the meantime, you may have success with tools like https://github.com/BuSung-dev/Root-My-Galaxy or https://github.com/NebuSec/CyberMeowfia/tree/main/IonStack (I haven't tested against either since I don't have a compatible device)).
-It does still work with an unlocked bootloader, but the results of anything attestation-related will be less useful.
+It does still *work* with an unlocked bootloader, but the results of anything attestation-related will be less useful.
 
 There are two main components, the `keystorkd` service that runs on the target device, and a Python client library that runs on the host.
 The library also comes with a CLI tool.
@@ -35,8 +37,8 @@ cmake --build build -j
 python3 -m pip install -e client/
 
 # push to the device, start the server, and forward the socket
-adb push build-ndk29/keystorkd /data/local/tmp/
-shell su -c "/data/local/tmp/keystorkd -d"
+adb push build/keystorkd /data/local/tmp/
+adb shell su -c "/data/local/tmp/keystorkd -d"
 adb forward tcp:9432 localabstract:keystork
 ```
 
