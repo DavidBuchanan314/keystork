@@ -24,13 +24,25 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/client/keystork/_proto"
 
-command -v protoc >/dev/null || {
-    echo "protoc not found (dnf install protobuf-compiler)" >&2
+want="$(tr -d '[:space:]' < "$root/proto/protobuf-version.txt")"
+
+# The daemon's CMake downloads exactly this protoc; reuse it if a build tree has
+# one, so regenerating needs nothing installed.
+protoc="$root/build/protoc/bin/protoc"
+[ -x "$protoc" ] || protoc="$(command -v protoc || true)"
+[ -n "$protoc" ] || {
+    echo "no protoc: configure the daemon's build to fetch one, or install $want" >&2
+    exit 1
+}
+
+have="$("$protoc" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+[ "$have" = "$want" ] || {
+    echo "protoc is $have but the tree is pinned to $want ($protoc)" >&2
     exit 1
 }
 
 mkdir -p "$out"
-protoc --proto_path="$root/proto" --python_out="$out" \
+"$protoc" --proto_path="$root/proto" --python_out="$out" \
     "$root/proto/keystork.proto" "$root/proto/spatula.proto"
 
 
@@ -38,4 +50,4 @@ protoc --proto_path="$root/proto" --python_out="$out" \
 # dependencies), so no import rewriting is needed.
 
 echo "wrote $out/keystork_pb2.py $out/spatula_pb2.py"
-echo "protoc: $(protoc --version)"
+echo "protoc: $("$protoc" --version) ($protoc)"

@@ -1,11 +1,10 @@
 # keystorkd -- cross-compiled with the Android NDK.
 #
-#   cmake -S server -B build \
-#         -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
-#         -DANDROID_ABI=arm64-v8a \
-#         -DANDROID_PLATFORM=android-31 \
-#         -DCMAKE_BUILD_TYPE=Release
+#   cmake -S server -B build
 #   cmake --build build -j
+#
+# With ANDROID_HOME and ANDROID_NDK_ROOT exported, that is the whole build:
+# the SDK, the NDK, the ABI and the API level are all resolved below.
 #
 # The keystore2 interface declares min_sdk_version 30 for its NDK backend, but
 # the daemon needs AServiceManager_waitForService, which the platform marks
@@ -13,6 +12,66 @@
 # nothing in practice: batched listing needs keystore2 V3, which is Android 14.
 
 cmake_minimum_required(VERSION 3.22)
+
+# ---------------------------------------------------------------------------
+# Android SDK and NDK
+#
+# Two separate inputs, both required: the NDK cross-compiles the daemon, and
+# the SDK is what Gradle builds the agent's APK with. Both must be resolved
+# before project(), which is where the toolchain file is read.
+# ---------------------------------------------------------------------------
+
+# ANDROID_HOME is the name Gradle, AGP and sdkmanager all use; ANDROID_SDK_ROOT
+# is its older spelling. A platforms/ subdirectory is what distinguishes a real
+# SDK from a stale path.
+foreach(_sdk "$ENV{ANDROID_HOME}" "$ENV{ANDROID_SDK_ROOT}")
+    if(_sdk AND IS_DIRECTORY "${_sdk}/platforms")
+        set(_android_sdk "${_sdk}")
+        break()
+    endif()
+endforeach()
+
+if(NOT _android_sdk)
+    message(FATAL_ERROR
+        "No Android SDK. Export ANDROID_HOME.\n"
+        "The daemon needs an NDK, and the agent's dex is built by Gradle, which "
+        "needs platforms/android-36 and a build-tools package:\n"
+        "  sdkmanager \"ndk;29.0.14206865\" \"platforms;android-36\" \"build-tools;36.0.0\"")
+endif()
+
+# ANDROID_NDK_ROOT is the NDK's own documented variable; ANDROID_NDK_HOME and
+# ANDROID_NDK are older spellings that CI images tend to set as well.
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    foreach(_root "$ENV{ANDROID_NDK_ROOT}" "$ENV{ANDROID_NDK_HOME}" "$ENV{ANDROID_NDK}")
+        if(_root AND EXISTS "${_root}/build/cmake/android.toolchain.cmake")
+            set(CMAKE_TOOLCHAIN_FILE "${_root}/build/cmake/android.toolchain.cmake"
+                CACHE FILEPATH "Android NDK toolchain file")
+            message(STATUS "Using NDK at ${_root}")
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT CMAKE_TOOLCHAIN_FILE)
+    message(FATAL_ERROR
+        "No NDK. Export ANDROID_NDK_ROOT, pointing at an NDK installed with\n"
+        "  sdkmanager \"ndk;29.0.14206865\"\n"
+        "which lands in ${_android_sdk}/ndk/<version>. Any release "
+        "will do: the NDK supplies only the toolchain, bionic and libc++, "
+        "since all Binder support comes from vendor/binder_ndk/.")
+endif()
+
+# The ABI is what the device is, and the API level is the floor explained above.
+# Cached rather than plain set() so the toolchain file sees them.
+if(NOT DEFINED ANDROID_ABI)
+    set(ANDROID_ABI "arm64-v8a" CACHE STRING "Target ABI")
+endif()
+if(NOT DEFINED ANDROID_PLATFORM)
+    set(ANDROID_PLATFORM "android-31" CACHE STRING "Minimum supported API level")
+endif()
+if(NOT DEFINED CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type")
+endif()
 
 # Everything we ship is linked statically, so what lands on the device is a
 # single self-contained binary with no libc++_shared.so to push alongside it.
@@ -29,9 +88,10 @@ project(keystorkd LANGUAGES C CXX ASM)
 
 if(NOT ANDROID)
     message(FATAL_ERROR
-        "keystorkd only builds for Android. Pass the NDK toolchain file:\n"
-        "  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake "
-        "-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30")
+        "keystorkd only builds for Android, but the toolchain file at\n"
+        "  ${CMAKE_TOOLCHAIN_FILE}\n"
+        "did not produce an Android build. Point -DCMAKE_TOOLCHAIN_FILE at an "
+        "NDK's build/cmake/android.toolchain.cmake.")
 endif()
 
 if(NOT ANDROID_STL STREQUAL "c++_static")
@@ -108,32 +168,82 @@ target_link_libraries(binder_ndk_headers INTERFACE binder_ndk_stub)
 # ---------------------------------------------------------------------------
 # protobuf
 #
-# The generated .pb.cc must match the runtime it links against, so protoc on the
-# host and libprotobuf-lite for the device are pinned to the same version. 3.19
-# is the last series with no abseil dependency, which keeps the device-side
-# build to a single small static library.
+# The generated .pb.cc must match the runtime it links against, so protoc and
+# libprotobuf-lite come from one version: proto/protobuf-version.txt, which the
+# agent's Gradle build and scripts/gen_proto.sh read too. 3.19 is the last
+# series with no abseil dependency, so the device links one static library and
+# the build cross-compiles one dependency tree.
+#
+# protoc is the upstream release binary rather than the host's, so the pairing
+# holds by construction on any machine.
 # ---------------------------------------------------------------------------
 
-set(KEYSTORK_PROTOBUF_VERSION "3.19.6" CACHE STRING
-    "protobuf version to build libprotobuf-lite from")
+file(READ "${KEYSTORK_ROOT}/proto/protobuf-version.txt" KEYSTORK_PROTOBUF_VERSION)
+string(STRIP "${KEYSTORK_PROTOBUF_VERSION}" KEYSTORK_PROTOBUF_VERSION)
+
 set(KEYSTORK_PROTOBUF_SOURCE_DIR "" CACHE PATH
     "Local protobuf checkout to build from instead of downloading (offline builds)")
+set(KEYSTORK_PROTOC "" CACHE FILEPATH
+    "protoc to use instead of the pinned download (offline builds, other hosts)")
 
-find_program(PROTOC_EXECUTABLE protoc)
-if(NOT PROTOC_EXECUTABLE)
-    message(FATAL_ERROR "protoc not found (dnf install protobuf-compiler)")
-endif()
+# sha256 of each upstream asset. A version bump lands here as an unknown-hash
+# error rather than as a silently unverified download.
+set(_protoc_sha256_3.19.6_linux-x86_64
+    "f51152d0926ccf18d89e2b4e4f31c4bf16ee5f94499d379029f80ddb8304bdd0")
+set(_protoc_sha256_3.19.6_linux-aarch_64
+    "c1028039721e2f3fa44d138f9ac35707966c6c81ccd79a07667a4dafb8751df7")
+set(_protoc_sha256_3.19.6_osx-x86_64
+    "c9bb6829452d2f8ed7a589f8a6d2a31d4a07cec8d03e34277bcd60c743bc8855")
 
-execute_process(COMMAND "${PROTOC_EXECUTABLE}" --version
-                OUTPUT_VARIABLE PROTOC_VERSION_OUTPUT
-                OUTPUT_STRIP_TRAILING_WHITESPACE)
-string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" PROTOC_VERSION "${PROTOC_VERSION_OUTPUT}")
-if(NOT PROTOC_VERSION VERSION_EQUAL KEYSTORK_PROTOBUF_VERSION)
-    # A mismatched generator and runtime fail at compile time with an opaque
-    # static assert, so it is caught here instead.
-    message(FATAL_ERROR
-        "protoc is ${PROTOC_VERSION} but the runtime is pinned to ${KEYSTORK_PROTOBUF_VERSION}.\n"
-        "Install a matching protoc, or set -DKEYSTORK_PROTOBUF_VERSION=${PROTOC_VERSION}.")
+if(KEYSTORK_PROTOC)
+    set(PROTOC_EXECUTABLE "${KEYSTORK_PROTOC}")
+else()
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        set(_protoc_os "linux")
+    elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        set(_protoc_os "osx")
+    endif()
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        set(_protoc_arch "x86_64")
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(_protoc_arch "aarch_64")
+    endif()
+
+    set(_protoc_platform "${_protoc_os}-${_protoc_arch}")
+    set(_protoc_hash "_protoc_sha256_${KEYSTORK_PROTOBUF_VERSION}_${_protoc_platform}")
+    if(NOT _protoc_os OR NOT _protoc_arch OR NOT DEFINED ${_protoc_hash})
+        message(FATAL_ERROR
+            "No pinned protoc ${KEYSTORK_PROTOBUF_VERSION} for "
+            "${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR}. Add its "
+            "sha256 above, or point -DKEYSTORK_PROTOC at a protoc of exactly "
+            "that version.")
+    endif()
+
+    set(_protoc_dir "${CMAKE_CURRENT_BINARY_DIR}/protoc")
+    set(PROTOC_EXECUTABLE "${_protoc_dir}/bin/protoc")
+    if(NOT EXISTS "${PROTOC_EXECUTABLE}")
+        set(_protoc_zip "${_protoc_dir}/protoc.zip")
+        message(STATUS "Downloading protoc ${KEYSTORK_PROTOBUF_VERSION} (${_protoc_platform})")
+        file(DOWNLOAD
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${KEYSTORK_PROTOBUF_VERSION}/protoc-${KEYSTORK_PROTOBUF_VERSION}-${_protoc_platform}.zip"
+            "${_protoc_zip}"
+            EXPECTED_HASH "SHA256=${${_protoc_hash}}"
+            STATUS _protoc_status)
+        list(GET _protoc_status 0 _protoc_status_code)
+        if(NOT _protoc_status_code EQUAL 0)
+            list(GET _protoc_status 1 _protoc_status_text)
+            file(REMOVE "${_protoc_zip}")
+            message(FATAL_ERROR
+                "Could not download protoc: ${_protoc_status_text}\n"
+                "Point -DKEYSTORK_PROTOC at a protoc "
+                "${KEYSTORK_PROTOBUF_VERSION} to build offline.")
+        endif()
+        file(ARCHIVE_EXTRACT INPUT "${_protoc_zip}" DESTINATION "${_protoc_dir}")
+        # The zip does not reliably carry the executable bit.
+        file(CHMOD "${PROTOC_EXECUTABLE}" PERMISSIONS
+             OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+             WORLD_READ WORLD_EXECUTE)
+    endif()
 endif()
 
 include(FetchContent)
@@ -153,14 +263,14 @@ set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
-# protoc comes from the host; cross-building it here would be pointless.
+# protoc runs on the host; this build is for the device.
 set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
 
 # protobuf 3.19 declares cmake_minimum_required(VERSION 3.1.3), which CMake 4
 # refuses outright. Raise the floor for the subproject only, then put it back so
 # our own policy settings are unaffected.
 set(_keystork_saved_policy_min "${CMAKE_POLICY_VERSION_MINIMUM}")
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 FetchContent_MakeAvailable(protobuf)
 set(CMAKE_POLICY_VERSION_MINIMUM "${_keystork_saved_policy_min}")
 
@@ -232,40 +342,25 @@ target_compile_options(keystore_aidl PRIVATE -w)
 # -- which matters, since AGP 8.x cannot run on Gradle 9.6 or newer.
 # ---------------------------------------------------------------------------
 
-set(KEYSTORK_ANDROID_SDK "$ENV{ANDROID_HOME}" CACHE PATH
-    "Android SDK root, passed to Gradle as ANDROID_HOME")
-
-if(NOT KEYSTORK_ANDROID_SDK)
-    message(FATAL_ERROR
-        "No Android SDK. Set ANDROID_HOME, or pass -DKEYSTORK_ANDROID_SDK=<path>.\n"
-        "The agent's dex is built by Gradle, which needs platforms/android-36 and "
-        "a build-tools package:\n"
-        "  sdkmanager \"platforms;android-36\" \"build-tools;36.0.0\"")
-endif()
-
 set(APK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/agent/apk")
 set(DEX_DIR "${CMAKE_CURRENT_BINARY_DIR}/gen/dex")
 set(AGENT_DEX "${DEX_DIR}/classes.dex")
 
-# CONFIGURE_DEPENDS so that adding a class re-runs the glob rather than being
-# silently left out of the build.
-file(GLOB_RECURSE AGENT_JAVA_SOURCES CONFIGURE_DEPENDS "${APK_DIR}/src/main/java/*.java")
-
-# Gradle decides for itself what is up to date, so this always runs; it is a
-# couple of seconds when there is nothing to do. The dex is only rewritten when
-# it has actually changed, which is what keeps the .incbin and the link from
-# redoing themselves every build.
-add_custom_command(
-    OUTPUT "${AGENT_DEX}"
-    COMMAND "${CMAKE_COMMAND}" -E env "ANDROID_HOME=${KEYSTORK_ANDROID_SDK}"
+# Gradle is the authority on what is up to date here, so it runs every build --
+# a couple of seconds when there is nothing to do. Its inputs are the Java, the
+# manifest, the build script, the keep rules and the wrapper's own version, and
+# a dependency list maintained here would be one edit away from being wrong:
+# stale keep rules would embed a dex missing classes the injected process needs,
+# which surfaces as a runtime failure inside somebody else's app.
+#
+# extract_dex.cmake copies the dex out only when it differs, so an unchanged
+# APK still leaves the .incbin and the link behind it alone.
+add_custom_target(agent_dex ALL
+    COMMAND "${CMAKE_COMMAND}" -E env "ANDROID_HOME=${_android_sdk}"
             "${APK_DIR}/gradlew" --project-dir "${APK_DIR}" --quiet assembleRelease
     COMMAND "${CMAKE_COMMAND}" "-DAPK_DIR=${APK_DIR}" "-DOUTPUT=${AGENT_DEX}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_dex.cmake"
-    DEPENDS ${AGENT_JAVA_SOURCES}
-            "${APK_DIR}/build.gradle.kts"
-            "${APK_DIR}/settings.gradle.kts"
-            "${APK_DIR}/src/main/AndroidManifest.xml"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_dex.cmake"
+    BYPRODUCTS "${AGENT_DEX}"
     COMMENT "building the agent's APK and taking its dex"
     VERBATIM)
 
@@ -275,7 +370,8 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" "-DBLOB=${AGENT_DEX}" "-DSYMBOL=kKeystorkDex"
             "-DOUTPUT=${DEX_BLOB}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
-    DEPENDS "${AGENT_DEX}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
+    DEPENDS "${AGENT_DEX}" agent_dex
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_blob.cmake"
     COMMENT "embedding the dex into the agent"
     VERBATIM)
 

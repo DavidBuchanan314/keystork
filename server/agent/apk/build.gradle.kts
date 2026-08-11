@@ -19,11 +19,11 @@ import com.google.protobuf.gradle.proto
 //   the keep graph, but at runtime the framework is told about these classes
 //   by the agent rewriting the bind data, not by any manifest.
 
-// Must match the protoc the daemon's CMake and scripts/gen_proto.sh use: a
-// generator and a runtime from different series fail deep inside generated
-// code with an unreadable message. 3.19 is the last series with no abseil
-// dependency, which is what keeps the daemon's static link small.
-val PROTOBUF_VERSION = "3.19.6"
+// The generator and the runtime must be the same version -- a mismatch fails
+// deep inside generated code with an unreadable message -- and so must the
+// daemon's, so the number lives in one file that CMake and
+// scripts/gen_proto.sh read as well.
+val PROTOBUF_VERSION = File(rootDir, "../../../proto/protobuf-version.txt").readText().trim()
 
 plugins {
     id("com.android.application") version "8.13.2"
@@ -33,6 +33,15 @@ plugins {
     // both in one file is the only way that stays true. The Python is the
     // exception, and is committed so the client installs without a protoc.
     id("com.google.protobuf") version "0.9.4"
+}
+
+// AGP 8.x cannot run on Gradle 9.6 or newer. The wrapper pins the version, so
+// this fires only when somebody upgrades it -- which is the moment the pairing
+// breaks, and the moment the failure is hardest to attribute.
+val (gradleMajor, gradleMinor) = gradle.gradleVersion.split(".")
+    .let { it[0].toInt() to it.getOrElse(1) { "0" }.toInt() }
+require(gradleMajor < 9 || (gradleMajor == 9 && gradleMinor < 6)) {
+    "AGP 8.x needs Gradle below 9.6, but the wrapper is ${gradle.gradleVersion}."
 }
 
 android {

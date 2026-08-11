@@ -84,3 +84,6 @@ __pycache__/
 # Gradle build of the agent's APK
 server/agent/apk/build/
 server/agent/apk/.gradle/
+
+# Local SDK and NDK paths
+env.sh
