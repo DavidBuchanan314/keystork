@@ -18,6 +18,9 @@
 
 #include <fcntl.h>
 #include <getopt.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stddef.h>
 #include <sys/socket.h>
@@ -41,6 +44,10 @@ constexpr int kListenBacklog = 8;
 // socket as the shell domain instead is the pairing adb already uses for every
 // ordinary `adb forward localabstract:`.
 constexpr char kDefaultSocketContext[] = "u:r:shell:s0";
+
+// `--tcp PORT` with no address binds every interface; `--tcp ADDR:PORT` picks
+// one.
+constexpr char kDefaultTcpAddress[] = "0.0.0.0";
 
 // Written by the SIGCHLD handler, read by the accept loop.
 volatile sig_atomic_t g_reaped = 0;
@@ -136,7 +143,7 @@ bool SetSocketCreateContext(const char* context) {
 // Binds to an abstract unix socket (leading NUL), so there is no filesystem
 // entry to collide with or clean up. `adb forward tcp:<port> localabstract:<name>`
 // bridges it to the host.
-int Listen(const std::string& name, const std::string& context) {
+int ListenUnix(const std::string& name, const std::string& context) {
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   if (name.size() + 1 > sizeof(addr.sun_path)) {
@@ -176,24 +183,96 @@ int Listen(const std::string& name, const std::string& context) {
   return fd;
 }
 
+// Splits `[ADDR:]PORT` into its two halves. An IPv6 literal must be bracketed,
+// `[::1]:9432`, so its own colons cannot be mistaken for the port separator.
+bool SplitHostPort(const std::string& spec, std::string* host, std::string* port) {
+  if (!spec.empty() && spec.front() == '[') {
+    const size_t close = spec.find(']');
+    if (close == std::string::npos || close + 1 >= spec.size() || spec[close + 1] != ':') {
+      KS_LOGE("'%s' is not [ADDR]:PORT", spec.c_str());
+      return false;
+    }
+    *host = spec.substr(1, close - 1);
+    *port = spec.substr(close + 2);
+  } else {
+    const size_t colon = spec.rfind(':');
+    if (colon == std::string::npos) {
+      *host = kDefaultTcpAddress;
+      *port = spec;
+    } else {
+      *host = spec.substr(0, colon);
+      *port = spec.substr(colon + 1);
+    }
+  }
+  if (port->empty()) {
+    KS_LOGE("'%s' names no port", spec.c_str());
+    return false;
+  }
+  return true;
+}
+
+// Binds a TCP listener described by `[ADDR:]PORT`. The address is resolved
+// rather than parsed, so a hostname works as well as a literal, and the family
+// follows whatever it resolves to.
+int ListenTcp(const std::string& spec, std::string* description) {
+  std::string host, port;
+  if (!SplitHostPort(spec, &host, &port)) return -1;
+
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
+  addrinfo* results = nullptr;
+  const int error = ::getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
+  if (error != 0) {
+    KS_LOGE("could not resolve '%s' port %s: %s", host.c_str(), port.c_str(),
+            ::gai_strerror(error));
+    return -1;
+  }
+
+  int fd = -1;
+  for (const addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+    fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+    if (fd < 0) continue;
+
+    // A session that was still open when the daemon was killed leaves the port
+    // in TIME_WAIT, and without this the restart would fail to bind.
+    const int on = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, kListenBacklog) == 0) break;
+    KS_LOGE("bind/listen on %s port %s: %s", host.c_str(), port.c_str(), ::strerror(errno));
+    ::close(fd);
+    fd = -1;
+  }
+  ::freeaddrinfo(results);
+
+  if (fd >= 0) *description = "tcp " + host + " port " + port;
+  return fd;
+}
+
 void Usage(const char* argv0) {
   ::fprintf(stderr,
-            "usage: %s [--socket NAME] [--socket-context CONTEXT] [--max-sessions N]\n"
-            "          [--daemonize]\n"
+            "usage: %s [--socket NAME | --tcp [ADDR:]PORT] [--socket-context CONTEXT]\n"
+            "          [--max-sessions N] [--daemonize]\n"
             "\n"
             "  --socket NAME        abstract unix socket to listen on (default: %s)\n"
-            "  --socket-context CTX SELinux context to label the socket with, so adbd is\n"
-            "                       allowed to connect to it (default: %s). Empty to leave\n"
-            "                       the socket in this process's own context.\n"
+            "  --tcp [ADDR:]PORT    listen on TCP instead of a unix socket. ADDR defaults\n"
+            "                       to %s; an IPv6 literal is bracketed, [::1]:9432.\n"
+            "  --socket-context CTX SELinux context to label the unix socket with, so adbd\n"
+            "                       is allowed to connect to it (default: %s). Empty to\n"
+            "                       leave the socket in this process's own context.\n"
             "  --max-sessions N     concurrent sessions to allow (default: %d)\n"
             "  --daemonize, -d      detach and return once the socket is bound. stderr is\n"
             "                       gone after that, so read logs with:\n"
             "                         adb logcat -s keystorkd\n"
             "\n"
-            "Run as root. Bridge to a host with:\n"
-            "  adb forward tcp:9432 localabstract:%s\n",
-            argv0, kDefaultSocketName, kDefaultSocketContext, kDefaultMaxSessions,
-            kDefaultSocketName);
+            "Run as root. Bridge a unix socket to a host with:\n"
+            "  adb forward tcp:9432 localabstract:%s\n"
+            "A TCP listener is reached directly, or through:\n"
+            "  adb forward tcp:9432 tcp:9432\n",
+            argv0, kDefaultSocketName, kDefaultTcpAddress, kDefaultSocketContext,
+            kDefaultMaxSessions, kDefaultSocketName);
 }
 
 }  // namespace
@@ -201,21 +280,30 @@ void Usage(const char* argv0) {
 int main(int argc, char** argv) {
   std::string socket_name = kDefaultSocketName;
   std::string socket_context = kDefaultSocketContext;
+  std::string tcp_spec;
+  bool tcp = false;
+  bool socket_named = false;
   int max_sessions = kDefaultMaxSessions;
   bool daemonize = false;
 
   static const option options[] = {
       {"socket", required_argument, nullptr, 's'},
+      {"tcp", required_argument, nullptr, 't'},
       {"socket-context", required_argument, nullptr, 'c'},
       {"max-sessions", required_argument, nullptr, 'm'},
       {"daemonize", no_argument, nullptr, 'd'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
-  for (int opt; (opt = ::getopt_long(argc, argv, "s:c:m:dh", options, nullptr)) != -1;) {
+  for (int opt; (opt = ::getopt_long(argc, argv, "s:t:c:m:dh", options, nullptr)) != -1;) {
     switch (opt) {
       case 's':
         socket_name = optarg;
+        socket_named = true;
+        break;
+      case 't':
+        tcp_spec = optarg;
+        tcp = true;
         break;
       case 'c':
         socket_context = optarg;
@@ -239,6 +327,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (tcp && socket_named) {
+    KS_LOGE("--socket and --tcp name two different listeners; pick one");
+    return 2;
+  }
+
   if (::geteuid() != 0) {
     // Without root there is no setresuid, so every session but one would fail
     // at the handshake. Fail now, where the message is obvious.
@@ -248,11 +341,17 @@ int main(int argc, char** argv) {
 
   // Bound before detaching, so the caller sees any failure and knows the socket
   // is ready the moment the command returns.
-  const int listen_fd = Listen(socket_name, socket_context);
+  std::string listening_on;
+  int listen_fd;
+  if (tcp) {
+    listen_fd = ListenTcp(tcp_spec, &listening_on);
+  } else {
+    listen_fd = ListenUnix(socket_name, socket_context);
+    listening_on = "abstract socket '" + socket_name + "' (context " +
+                   (socket_context.empty() ? "inherited" : socket_context) + ")";
+  }
   if (listen_fd < 0) return 1;
-  KS_LOGI("listening on abstract socket '%s' (context %s), up to %d concurrent sessions",
-          socket_name.c_str(), socket_context.empty() ? "inherited" : socket_context.c_str(),
-          max_sessions);
+  KS_LOGI("listening on %s, up to %d concurrent sessions", listening_on.c_str(), max_sessions);
 
   if (daemonize && !Daemonize()) {
     KS_LOGE("could not daemonize: %s", ::strerror(errno));
@@ -290,6 +389,14 @@ int main(int argc, char** argv) {
       if (errno == EINTR || errno == ECONNABORTED) continue;
       KS_LOGE("accept: %s", ::strerror(errno));
       break;
+    }
+
+    // An interactive exec is a stream of one-keystroke writes, and Nagle would
+    // hold each one back waiting for the ack of the last. The client sets this
+    // on its end for the same reason.
+    if (tcp) {
+      const int on = 1;
+      ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
     }
 
     // Each session holds a child for its whole lifetime, so the ceiling is what
