@@ -830,6 +830,41 @@ class KeystoreSession:
         )
         self._characteristics.pop(str(_key_descriptor(key)), None)
 
+    def update_subcomponent(
+        self,
+        key: KeyRef,
+        certificates: Optional[Sequence[bytes]] = None,
+    ) -> None:
+        """Replace a key's certificate chain, leaving the key itself alone.
+
+        `certificates` is the chain leaf-first, as `KeyMetadata.certificates`
+        hands it back; the leaf and the rest go into the two fields keystore2
+        keeps them in. Passing `None` clears both, which is permitted and
+        leaves a key carrying no certificate.
+
+        This is what finishes an enrolment. A key generated with an attestation
+        challenge arrives holding KeyMint's chain, which says where the key
+        lives; a CA that certifies the same public key answers with one that
+        says who vouches for it, and this is where that answer goes. It is the
+        same call `KeyStore.setKeyEntry(alias, key, null, chain)` makes, so a
+        key enrolled this way is indistinguishable from one an app enrolled for
+        itself -- both halves in the keystore, nothing kept on the side.
+
+        keystore2 stores the bytes without parsing them and without checking
+        them against the key, so a chain that belongs to some other key is
+        accepted as readily as the right one. Whatever is sent replaces what
+        was there; nothing is merged.
+        """
+        request = pb.UpdateSubcomponentRequest(key=_key_descriptor(key)._to_wire())
+        if certificates:
+            request.certificate = bytes(certificates[0])
+            if len(certificates) > 1:
+                request.certificate_chain = b"".join(bytes(c) for c in certificates[1:])
+
+        self._exchange(pb.KeystoreRequest(update_subcomponent=request))
+        # The cached metadata carries the old certificates.
+        self._characteristics.pop(str(_key_descriptor(key)), None)
+
     # -- generation ---------------------------------------------------------
 
     def generate_key(

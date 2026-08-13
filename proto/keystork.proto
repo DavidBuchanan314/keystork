@@ -651,6 +651,41 @@ message DeleteKeyRequest {
 
 message DeleteKeyResponse {}
 
+// Replaces the certificates attached to an existing key, leaving the key
+// material alone. On IKeystoreService for the same reason deleteKey is: the
+// entry is found by descriptor.
+//
+// This is the other half of enrolment. A key generated with an attestation
+// challenge comes back carrying KeyMint's chain, which proves where the key
+// lives but says nothing about who vouches for it; a CA that certifies the
+// same public key answers with a chain that does. Writing that chain here is
+// what `KeyStore.setKeyEntry(alias, key, null, chain)` does on the Java side,
+// and it is how an app's own provisioning ends -- the issued chain replaces
+// the attestation chain under the alias it belongs to, so both halves of the
+// credential live in the keystore and nothing else has to be kept.
+//
+// Both fields are optional and independent. Sending neither clears both, which
+// keystore2 permits and which leaves a key with no certificate at all.
+// Overwriting is not merging: what is sent replaces what was there.
+//
+// The split follows KeyMetadata: `certificate` is the leaf on its own, and
+// `certificate_chain` is everything above it, DER concatenated. keystore2
+// stores the bytes and hands them back without parsing either, so a chain that
+// does not verify, or does not belong to the key, is stored just as happily as
+// one that does.
+message UpdateSubcomponentRequest {
+  // Which key's certificates to replace.
+  KeyDescriptor key = 1;
+
+  // Leaf certificate, DER. Absent clears it.
+  optional bytes certificate = 2;
+
+  // The rest of the chain, DER certificates concatenated. Absent clears it.
+  optional bytes certificate_chain = 3;
+}
+
+message UpdateSubcomponentResponse {}
+
 // ---------------------------------------------------------------------------
 // Operations (encrypt / decrypt / sign / verify)
 //
@@ -778,6 +813,7 @@ message KeystoreRequest {
     GetKeyEntryRequest get_key_entry = 8;
     GenerateKeyRequest generate_key = 10;
     DeleteKeyRequest delete_key = 12;
+    UpdateSubcomponentRequest update_subcomponent = 14;
     RunOperationRequest run_operation = 2;
     OpBeginRequest op_begin = 3;
     OpUpdateAadRequest op_update_aad = 4;
@@ -806,6 +842,7 @@ message KeystoreResponse {
     GetKeyEntryResponse get_key_entry = 9;
     GenerateKeyResponse generate_key = 11;
     DeleteKeyResponse delete_key = 13;
+    UpdateSubcomponentResponse update_subcomponent = 15;
     RunOperationResponse run_operation = 3;
     OpBeginResponse op_begin = 4;
     OpUpdateAadResponse op_update_aad = 5;

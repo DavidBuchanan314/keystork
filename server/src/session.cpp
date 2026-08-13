@@ -423,6 +423,31 @@ void HandleDeleteKey(IKeystoreService* service, const pb::DeleteKeyRequest& requ
   response->mutable_delete_key();
 }
 
+// updateSubcomponent. Replaces a key's certificates without touching the key.
+// Both arguments are nullable and independent, and an absent one clears rather
+// than keeps -- so the two optionals are passed straight through as they came,
+// and a request that sets neither is a request to hold no certificate at all.
+void HandleUpdateSubcomponent(IKeystoreService* service,
+                              const pb::UpdateSubcomponentRequest& request,
+                              pb::KeystoreResponse* response) {
+  std::optional<std::vector<uint8_t>> certificate;
+  if (request.has_certificate()) {
+    certificate.emplace(request.certificate().begin(), request.certificate().end());
+  }
+  std::optional<std::vector<uint8_t>> chain;
+  if (request.has_certificate_chain()) {
+    chain.emplace(request.certificate_chain().begin(), request.certificate_chain().end());
+  }
+
+  const auto status =
+      service->updateSubcomponent(FromWire(request.key()), certificate, chain);
+  if (!status.isOk()) {
+    FillError(status, response->mutable_error());
+    return;
+  }
+  response->mutable_update_subcomponent();
+}
+
 // Everything a session carries between round-trips. The operation handle is the
 // only real state: keystore2 owns the operation, this is the live Binder proxy
 // to it, and there is at most one because requests are synchronous. If the
@@ -1012,6 +1037,10 @@ int RunConnection(int fd, pid_t supervisor_pid) {
           break;
         case pb::KeystoreRequest::kDeleteKey:
           HandleDeleteKey(session.service.get(), request.delete_key(), &response);
+          break;
+        case pb::KeystoreRequest::kUpdateSubcomponent:
+          HandleUpdateSubcomponent(session.service.get(), request.update_subcomponent(),
+                                   &response);
           break;
         case pb::KeystoreRequest::kRunOperation:
           HandleRunOperation(&session, request.run_operation(), &response);
